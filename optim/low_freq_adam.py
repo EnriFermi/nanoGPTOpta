@@ -2,50 +2,35 @@ import math
 import torch
 
 
-class LowFreqMuon(torch.optim.Optimizer):
+class LowFreqAdam(torch.optim.Optimizer):
     """
-    Wrapper around torch.optim.Muon that shapes the gradient in a low-frequency
-    kernel space before applying the Muon update.
+    Adam optimizer with low-frequency kernel shaping of the logits gradient before the update.
     """
 
     def __init__(
         self,
         params,
         lr=1e-3,
-        weight_decay=0.1,
-        momentum=0.95,
-        nesterov=False,
-        ns_coefficients=(3.4445, -4.775, 2.0315),
-        eps=1e-7,
-        ns_steps=5,
-        adjust_lr_fn=None,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.0,
         m=32,
         sigma=1.0,
         lam=0.5,
         scale_match=True,
-        muon_impl=None,
+        adam_impl=torch.optim.Adam,
     ):
-        if muon_impl is None:
-            from optim import get_muon_impl
-
-            muon_impl = get_muon_impl()
-
-        self.base = muon_impl(
+        self.base = adam_impl(
             params,
             lr=lr,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            nesterov=nesterov,
-            ns_coefficients=ns_coefficients,
+            betas=betas,
             eps=eps,
-            ns_steps=ns_steps,
-            adjust_lr_fn=adjust_lr_fn,
+            weight_decay=weight_decay,
         )
         self.m, self.sigma, self.lam, self.scale_match = int(m), float(sigma), float(lam), bool(scale_match)
         self.W = None
         self.clip_grad_norm = None
         self.ddp_model = None
-        # share parameter groups and defaults/state with the wrapped Muon instance
         super().__init__(self.base.param_groups, self.base.defaults)
         self.state = self.base.state
 
@@ -93,8 +78,9 @@ class LowFreqMuon(torch.optim.Optimizer):
         for idx, (logits, y, x, loss) in enumerate(outputs):
             if self.ddp_model is not None:
                 self.ddp_model.require_backward_grad_sync = (idx == total_outputs - 1)
-            # true dL/dlogits for arbitrary loss
-            r = torch.autograd.grad(loss, logits, retain_graph=True)[0]  # shape: [B,...]
+
+            # dL/dlogits for arbitrary loss
+            r = torch.autograd.grad(loss, logits, retain_graph=True)[0]  # shape [B,...]
 
             with torch.no_grad():
                 B = logits.size(0)
@@ -125,3 +111,4 @@ class LowFreqMuon(torch.optim.Optimizer):
     def load_state_dict(self, state_dict):
         self.W = state_dict.pop("_lowfreq_W", None)
         self.base.load_state_dict(state_dict)
+

@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from optim import LowFreqMuon
+from optim import LowFreqAdam
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -56,7 +56,7 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
-# adamw optimizer
+# optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
@@ -68,13 +68,7 @@ decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
 lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
-optimizer_name = 'adamw' # 'adamw', 'muon', or 'lowfreq_muon'
-muon_momentum = 0.95
-muon_nesterov = False
-muon_ns_coefficients = (3.4445, -4.775, 2.0315)
-muon_eps = 1e-7
-muon_ns_steps = 5
-muon_adjust_lr_fn = None
+optimizer_name = 'adam' # 'adam' or 'lowfreq_adam'
 lowfreq_m = 32
 lowfreq_sigma = 1.0
 lowfreq_lam = 0.5
@@ -212,18 +206,12 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
-using_lowfreq = optimizer_name.lower() == 'lowfreq_muon'
+using_lowfreq = optimizer_name.lower() == 'lowfreq_adam'
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not using_lowfreq))
 
 # optimizer
 optim_kwargs = dict(
-    momentum=muon_momentum,
-    nesterov=muon_nesterov,
-    ns_coefficients=muon_ns_coefficients,
-    eps=muon_eps,
-    ns_steps=muon_ns_steps,
-    adjust_lr_fn=muon_adjust_lr_fn,
     m=lowfreq_m,
     sigma=lowfreq_sigma,
     lam=lowfreq_lam,
@@ -239,7 +227,7 @@ optimizer = model.configure_optimizers(
 )
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
-using_lowfreq = isinstance(optimizer, LowFreqMuon)
+using_lowfreq = isinstance(optimizer, LowFreqAdam)
 if using_lowfreq and grad_clip != 0.0:
     optimizer.clip_grad_norm = grad_clip
 checkpoint = None # free up memory
