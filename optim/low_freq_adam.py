@@ -84,14 +84,9 @@ class LowFreqAdam(torch.optim.Optimizer):
             r = torch.autograd.grad(
                 loss,
                 logits,
-                retain_graph=True,     # keep graph for backward
-                allow_unused=True,
+                retain_graph=True,  # keep graph alive for the subsequent backward
+                allow_unused=False,
             )[0]
-            if r is None:
-                if not hasattr(self, "_warned_unused"):
-                    print("LowFreqAdam: logits gradient was None; skipping this micro-step.")
-                    self._warned_unused = True
-                continue
 
             with torch.no_grad():
                 B = logits.size(0)
