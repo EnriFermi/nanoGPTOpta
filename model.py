@@ -288,9 +288,10 @@ class GPT(nn.Module):
         elif optimizer_name == "adam_custom":
             from optim import AdamCustom
 
+            custom_lr = learning_rate * math.sqrt(2.0)
             optimizer = AdamCustom(
                 optim_groups,
-                lr=learning_rate,
+                lr=custom_lr,
                 betas=betas,
                 eps=optimizer_kwargs.get("eps", 1e-8),
                 weight_decay=weight_decay,

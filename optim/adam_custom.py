@@ -17,7 +17,6 @@ from torch.optim.optimizer import (
     _use_grad_for_differentiable,
     _view_as_real,
     DeviceDict,
-    DeviceDtypeDict,
     Optimizer,
     ParamsT,
 )
@@ -271,7 +270,7 @@ def _single_tensor_adam(
         assert isinstance(beta2, float)
 
     if isinstance(beta1, Tensor):
-        beta1_dict: Optional[DeviceDtypeDict] = {(beta1.device, beta1.dtype): beta1}
+        beta1_dict: Optional[dict] = {(beta1.device, beta1.dtype): beta1}
     else:
         beta1_dict = None
 
@@ -722,4 +721,3 @@ def adam(
         grad_scale=grad_scale,
         found_inf=found_inf,
     )
-
