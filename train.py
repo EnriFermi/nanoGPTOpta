@@ -324,16 +324,17 @@ while True:
     # and using the GradScaler if data type is float16
     if using_lowfreq:
         optimizer.zero_grad(set_to_none=True)
-        micro_outputs = []
         for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
             with ctx:
                 logits, micro_loss = model(X, Y)
                 micro_loss = micro_loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            micro_outputs.append((logits, Y, X, micro_loss))
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
-        loss = torch.stack([out[3] for out in micro_outputs]).sum()
-        optimizer.step(lambda: micro_outputs)
+            # low-frequency gradient shaping inline
+            optimizer.step(lambda: [(logits, Y, X, micro_loss)])
+        loss = micro_loss * gradient_accumulation_steps
         optimizer.zero_grad(set_to_none=True)
     else:
         for micro_step in range(gradient_accumulation_steps):
