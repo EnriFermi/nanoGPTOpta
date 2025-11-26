@@ -31,6 +31,7 @@ class LowFreqAdam(torch.optim.Optimizer):
         self.W = None
         self.clip_grad_norm = None
         self.ddp_model = None
+        self.debug = False  # set to True to enable debug checks
         super().__init__(self.base.param_groups, self.base.defaults)
         self.state = self.base.state
 
@@ -80,9 +81,16 @@ class LowFreqAdam(torch.optim.Optimizer):
                 self.ddp_model.require_backward_grad_sync = (idx == total_outputs - 1)
 
             # dL/dlogits for arbitrary loss
-            r = torch.autograd.grad(loss, logits, retain_graph=True, allow_unused=True)[0]  # shape [B,...]
+            r = torch.autograd.grad(
+                loss,
+                logits,
+                retain_graph=True,     # keep graph for backward
+                allow_unused=True,
+            )[0]
             if r is None:
-                # If logits were not used in loss (shouldn't happen), skip this chunk.
+                if not hasattr(self, "_warned_unused"):
+                    print("LowFreqAdam: logits gradient was None; skipping this micro-step.")
+                    self._warned_unused = True
                 continue
 
             with torch.no_grad():
@@ -96,11 +104,29 @@ class LowFreqAdam(torch.optim.Optimizer):
                     r_tilde_flat = (rn / (rtn + 1e-12)) * r_tilde_flat
                 r_tilde = r_tilde_flat.view_as(r)
 
-            logits.backward(gradient=r_tilde)
+                if self.debug:
+                    def _check(name, t):
+                        if t is None:
+                            return
+                        if not torch.isfinite(t).all():
+                            print(f"[LowFreqAdam DEBUG] non-finite values in {name}: "
+                                  f"max_abs={t.detach().abs().max().item():.3e}")
+                        else:
+                            vmax = t.detach().abs().max().item()
+                            if vmax > 1e6:
+                                print(f"[LowFreqAdam DEBUG] large values in {name}: max_abs={vmax:.3e}")
+
+                    _check("loss", loss)
+                    _check("logits", logits)
+                    _check("r", r)
+                    _check("r_tilde", r_tilde)
+                    _check("Khat", Khat)
+
+            logits.backward(gradient=r_tilde, retain_graph=(idx < total_outputs - 1))
             total_loss = loss if total_loss is None else total_loss + loss
 
         if self.clip_grad_norm is not None and self.clip_grad_norm > 0.0:
-            params = [p for group in self.base.param_groups for p in group['params']]
+            params = [p for group in self.base.param_groups for p in group["params"]]
             torch.nn.utils.clip_grad_norm_(params, self.clip_grad_norm)
 
         self.base.step()
