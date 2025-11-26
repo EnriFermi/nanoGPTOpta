@@ -23,8 +23,13 @@ class LowFreqMuon(torch.optim.Optimizer):
         sigma=1.0,
         lam=0.5,
         scale_match=True,
-        muon_impl=torch.optim.Muon,
+        muon_impl=None,
     ):
+        if muon_impl is None:
+            from optim import get_muon_impl
+
+            muon_impl = get_muon_impl()
+
         self.base = muon_impl(
             params,
             lr=lr,

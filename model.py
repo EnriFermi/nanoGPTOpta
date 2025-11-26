@@ -286,8 +286,9 @@ class GPT(nn.Module):
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
             print(f"using fused AdamW: {use_fused}")
         elif optimizer_name == "muon":
-            if not hasattr(torch.optim, "Muon"):
-                raise ValueError("torch.optim.Muon is not available in this version of PyTorch")
+            from optim import get_muon_impl
+
+            muon_impl = get_muon_impl()
             muon_args = {
                 "lr": learning_rate,
                 "momentum": optimizer_kwargs.get("momentum", 0.95),
@@ -298,11 +299,12 @@ class GPT(nn.Module):
                 "ns_steps": optimizer_kwargs.get("ns_steps", 5),
                 "adjust_lr_fn": optimizer_kwargs.get("adjust_lr_fn", None),
             }
-            optimizer = torch.optim.Muon(optim_groups, **muon_args)
-            print("using Muon optimizer")
+            optimizer = muon_impl(optim_groups, **muon_args)
+            print(f"using Muon optimizer ({'torch' if hasattr(torch.optim, 'Muon') else 'vendored'})")
         elif optimizer_name == "lowfreq_muon":
-            from optim.low_freq_muon import LowFreqMuon
+            from optim import LowFreqMuon, get_muon_impl
 
+            muon_impl = get_muon_impl()
             muon_args = {
                 "momentum": optimizer_kwargs.get("momentum", 0.95),
                 "nesterov": optimizer_kwargs.get("nesterov", False),
@@ -321,10 +323,11 @@ class GPT(nn.Module):
                 optim_groups,
                 lr=learning_rate,
                 weight_decay=weight_decay,
+                muon_impl=muon_impl,
                 **muon_args,
                 **lf_kwargs,
             )
-            print("using LowFreqMuon optimizer")
+            print(f"using LowFreqMuon optimizer (base={'torch' if hasattr(torch.optim, 'Muon') else 'vendored'})")
         else:
             raise ValueError(f"Unknown optimizer_name={optimizer_name}")
 
