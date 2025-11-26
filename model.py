@@ -303,6 +303,26 @@ class GPT(nn.Module):
                 fused=optimizer_kwargs.get("fused", None),
             )
             print("using AdamCustom optimizer")
+
+        elif optimizer_name == "adam_custom_nosqrt":
+            from optim import AdamCustom
+
+            custom_lr = learning_rate
+            optimizer = AdamCustom(
+                optim_groups,
+                lr=custom_lr,
+                betas=betas,
+                eps=optimizer_kwargs.get("eps", 1e-8),
+                weight_decay=weight_decay,
+                amsgrad=optimizer_kwargs.get("amsgrad", False),
+                foreach=optimizer_kwargs.get("foreach", None),
+                maximize=optimizer_kwargs.get("maximize", False),
+                capturable=optimizer_kwargs.get("capturable", False),
+                differentiable=optimizer_kwargs.get("differentiable", False),
+                fused=optimizer_kwargs.get("fused", None),
+            )
+            print("using AdamCustom no sqrt optimizer")
+
         elif optimizer_name == "lowfreq_adam":
             from optim import LowFreqAdam
 

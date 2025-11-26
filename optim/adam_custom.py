@@ -38,6 +38,7 @@ class AdamCustom(Optimizer):
         differentiable: bool = False,
         fused: Optional[bool] = None,
     ):
+        print("SOSAL", lr)
         if isinstance(lr, Tensor):
             if foreach and not capturable:
                 raise ValueError(
