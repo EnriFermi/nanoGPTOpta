@@ -63,55 +63,45 @@ class LowFreqAdam(torch.optim.Optimizer):
     def zero_grad(self, set_to_none=True):
         self.base.zero_grad(set_to_none=set_to_none)
 
-    def _normalize_outputs(self, outputs):
-        # allow closure to return a single (logits, y, x, loss) tuple or a list/tuple of them
-        if isinstance(outputs, tuple) and len(outputs) == 4 and not isinstance(outputs[0], (list, tuple)):
-            return [outputs]
-        if not isinstance(outputs, (list, tuple)) or len(outputs) == 0:
-            raise ValueError("closure must return a tuple or a non-empty list/tuple of tuples")
-        return list(outputs)
+    @torch.no_grad()
+    def shape_grad(self, grad, x):
+        """
+        Transform dL/dlogits -> low-frequency-shaped gradient.
+        Intended to be used from a logits.register_hook.
+        """
+        B = grad.shape[0]
+        r_flat = grad.view(B, -1)
+        Khat = self._khat(x)
+        r_tilde_flat = (1.0 - self.lam) * r_flat + self.lam * (Khat @ r_flat)
+        if self.scale_match:
+            rn = r_flat.norm()
+            rtn = r_tilde_flat.norm()
+            r_tilde_flat = (rn / (rtn + 1e-12)) * r_tilde_flat
+        r_tilde = r_tilde_flat.view_as(grad)
 
-    def step(self, closure):
-        logits, y, x, loss = self._normalize_outputs(closure())[0]
+        if self.debug:
+            def _check(name, t):
+                if t is None:
+                    return
+                if not torch.isfinite(t).all():
+                    print(f"[LowFreqAdam DEBUG] non-finite values in {name}: "
+                          f"max_abs={t.detach().abs().max().item():.3e}")
+                else:
+                    vmax = t.detach().abs().max().item()
+                    if vmax > 1e6:
+                        print(f"[LowFreqAdam DEBUG] large values in {name}: max_abs={vmax:.3e}")
 
-        # dL/dlogits for arbitrary loss
-        r = torch.autograd.grad(
-            loss,
-            logits,
-            retain_graph=True,  # keep graph alive for the subsequent backward
-            allow_unused=False,
-        )[0]
+            _check("grad_in", grad)
+            _check("grad_out", r_tilde)
+            _check("Khat", Khat)
 
-        with torch.no_grad():
-            B = logits.size(0)
-            r_flat = r.view(B, -1)
-            Khat = self._khat(x)
-            r_tilde_flat = (1.0 - self.lam) * r_flat + self.lam * (Khat @ r_flat)
-            if self.scale_match:
-                rn = r_flat.norm()
-                rtn = r_tilde_flat.norm()
-                r_tilde_flat = (rn / (rtn + 1e-12)) * r_tilde_flat
-            r_tilde = r_tilde_flat.view_as(r)
+        return r_tilde
 
-            if self.debug:
-                def _check(name, t):
-                    if t is None:
-                        return
-                    if not torch.isfinite(t).all():
-                        print(f"[LowFreqAdam DEBUG] non-finite values in {name}: "
-                              f"max_abs={t.detach().abs().max().item():.3e}")
-                    else:
-                        vmax = t.detach().abs().max().item()
-                        if vmax > 1e6:
-                            print(f"[LowFreqAdam DEBUG] large values in {name}: max_abs={vmax:.3e}")
-
-                _check("loss", loss)
-                _check("logits", logits)
-                _check("r", r)
-                _check("r_tilde", r_tilde)
-                _check("Khat", Khat)
-
-        logits.backward(gradient=r_tilde, retain_graph=False)
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
 
         if self.clip_grad_norm is not None and self.clip_grad_norm > 0.0:
             params = [p for group in self.base.param_groups for p in group["params"]]

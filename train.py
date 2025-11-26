@@ -328,13 +328,20 @@ while True:
             if ddp:
                 model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
             with ctx:
-                logits, micro_loss = model(X, Y)
-                micro_loss = micro_loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+                logits, loss = model(X, Y)
+                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            # register hook on logits to shape its gradient
+            x_local = X
+            def _lf_hook(grad, x=x_local):
+                return optimizer.shape_grad(grad, x)
+            logits.register_hook(_lf_hook)
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
-            # low-frequency gradient shaping inline
-            optimizer.step(lambda: [(logits, Y, X, micro_loss)])
-        loss = micro_loss * gradient_accumulation_steps
+            loss.backward()
+        if grad_clip != 0.0 and optimizer.clip_grad_norm is not None:
+            params = [p for group in optimizer.base.param_groups for p in group["params"]]
+            torch.nn.utils.clip_grad_norm_(params, grad_clip)
+        optimizer.step()
         optimizer.zero_grad(set_to_none=True)
     else:
         for micro_step in range(gradient_accumulation_steps):
