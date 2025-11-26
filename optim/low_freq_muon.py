@@ -1,0 +1,122 @@
+import math
+import torch
+
+
+class LowFreqMuon(torch.optim.Optimizer):
+    """
+    Wrapper around torch.optim.Muon that shapes the gradient in a low-frequency
+    kernel space before applying the Muon update.
+    """
+
+    def __init__(
+        self,
+        params,
+        lr=1e-3,
+        weight_decay=0.1,
+        momentum=0.95,
+        nesterov=False,
+        ns_coefficients=(3.4445, -4.775, 2.0315),
+        eps=1e-7,
+        ns_steps=5,
+        adjust_lr_fn=None,
+        m=32,
+        sigma=1.0,
+        lam=0.5,
+        scale_match=True,
+        muon_impl=torch.optim.Muon,
+    ):
+        self.base = muon_impl(
+            params,
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_coefficients=ns_coefficients,
+            eps=eps,
+            ns_steps=ns_steps,
+            adjust_lr_fn=adjust_lr_fn,
+        )
+        self.m, self.sigma, self.lam, self.scale_match = int(m), float(sigma), float(lam), bool(scale_match)
+        self.W = None
+        self.clip_grad_norm = None
+        self.ddp_model = None
+        # share parameter groups and defaults/state with the wrapped Muon instance
+        super().__init__(self.base.param_groups, self.base.defaults)
+        self.state = self.base.state
+
+    @torch.no_grad()
+    def _khat(self, x):
+        B = x.shape[0]
+        D = x[0].numel()
+        xf = x.view(B, D).to(torch.float64)
+
+        if self.W is None:
+            Xc = xf - xf.mean(0, keepdim=True)
+            _, _, Vh = torch.linalg.svd(Xc, full_matrices=False)
+            k = min(self.m, Vh.size(0))
+            Wp = Vh[:k]
+            if k < self.m:
+                extra = torch.randn(self.m - k, D, device=x.device, dtype=torch.float64) / math.sqrt(D)
+                Wp = torch.cat([Wp, extra], dim=0)
+            self.W = Wp.to(x.device)
+
+        theta = 2 * math.pi * (xf @ self.W.t())
+        d = theta[:, None, :] - theta[None, :, :]
+        d = (d + math.pi) % (2 * math.pi) - math.pi
+        K = torch.exp(-(d.pow(2).sum(-1)) / (2.0 * self.sigma**2))
+        K = 0.5 * (K + K.t())
+        dv = K.diag().clamp_min(1e-12).sqrt()
+        Khat = (K / dv).t() / dv
+        return Khat.to(dtype=x.dtype)
+
+    def zero_grad(self, set_to_none=True):
+        self.base.zero_grad(set_to_none=set_to_none)
+
+    def _normalize_outputs(self, outputs):
+        # allow closure to return a single (logits, y, x, loss) tuple or a list/tuple of them
+        if isinstance(outputs, tuple) and len(outputs) == 4 and not isinstance(outputs[0], (list, tuple)):
+            return [outputs]
+        if not isinstance(outputs, (list, tuple)) or len(outputs) == 0:
+            raise ValueError("closure must return a tuple or a non-empty list/tuple of tuples")
+        return list(outputs)
+
+    def step(self, closure):
+        outputs = self._normalize_outputs(closure())
+        total_loss = None
+        total_outputs = len(outputs)
+
+        for idx, (logits, y, x, loss) in enumerate(outputs):
+            if self.ddp_model is not None:
+                self.ddp_model.require_backward_grad_sync = (idx == total_outputs - 1)
+            # true dL/dlogits for arbitrary loss
+            r = torch.autograd.grad(loss, logits, retain_graph=True)[0]  # shape: [B,...]
+
+            with torch.no_grad():
+                B = logits.size(0)
+                r_flat = r.view(B, -1)
+                Khat = self._khat(x)
+                r_tilde_flat = (1.0 - self.lam) * r_flat + self.lam * (Khat @ r_flat)
+                if self.scale_match:
+                    rn = r_flat.norm()
+                    rtn = r_tilde_flat.norm()
+                    r_tilde_flat = (rn / (rtn + 1e-12)) * r_tilde_flat
+                r_tilde = r_tilde_flat.view_as(r)
+
+            logits.backward(gradient=r_tilde)
+            total_loss = loss if total_loss is None else total_loss + loss
+
+        if self.clip_grad_norm is not None and self.clip_grad_norm > 0.0:
+            params = [p for group in self.base.param_groups for p in group['params']]
+            torch.nn.utils.clip_grad_norm_(params, self.clip_grad_norm)
+
+        self.base.step()
+        return total_loss
+
+    def state_dict(self):
+        state = self.base.state_dict()
+        state["_lowfreq_W"] = self.W
+        return state
+
+    def load_state_dict(self, state_dict):
+        self.W = state_dict.pop("_lowfreq_W", None)
+        self.base.load_state_dict(state_dict)

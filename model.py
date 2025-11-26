@@ -260,7 +260,8 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, optimizer_name="adamw", optimizer_kwargs=None):
+        optimizer_kwargs = optimizer_kwargs or {}
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -277,12 +278,55 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        optimizer_name = optimizer_name.lower()
+        if optimizer_name == "adamw":
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+        elif optimizer_name == "muon":
+            if not hasattr(torch.optim, "Muon"):
+                raise ValueError("torch.optim.Muon is not available in this version of PyTorch")
+            muon_args = {
+                "lr": learning_rate,
+                "momentum": optimizer_kwargs.get("momentum", 0.95),
+                "weight_decay": weight_decay,
+                "nesterov": optimizer_kwargs.get("nesterov", False),
+                "ns_coefficients": optimizer_kwargs.get("ns_coefficients", (3.4445, -4.775, 2.0315)),
+                "eps": optimizer_kwargs.get("eps", 1e-7),
+                "ns_steps": optimizer_kwargs.get("ns_steps", 5),
+                "adjust_lr_fn": optimizer_kwargs.get("adjust_lr_fn", None),
+            }
+            optimizer = torch.optim.Muon(optim_groups, **muon_args)
+            print("using Muon optimizer")
+        elif optimizer_name == "lowfreq_muon":
+            from optim.low_freq_muon import LowFreqMuon
+
+            muon_args = {
+                "momentum": optimizer_kwargs.get("momentum", 0.95),
+                "nesterov": optimizer_kwargs.get("nesterov", False),
+                "ns_coefficients": optimizer_kwargs.get("ns_coefficients", (3.4445, -4.775, 2.0315)),
+                "eps": optimizer_kwargs.get("eps", 1e-7),
+                "ns_steps": optimizer_kwargs.get("ns_steps", 5),
+                "adjust_lr_fn": optimizer_kwargs.get("adjust_lr_fn", None),
+            }
+            lf_kwargs = {
+                "m": optimizer_kwargs.get("m", 32),
+                "sigma": optimizer_kwargs.get("sigma", 1.0),
+                "lam": optimizer_kwargs.get("lam", 0.5),
+                "scale_match": optimizer_kwargs.get("scale_match", True),
+            }
+            optimizer = LowFreqMuon(
+                optim_groups,
+                lr=learning_rate,
+                weight_decay=weight_decay,
+                **muon_args,
+                **lf_kwargs,
+            )
+            print("using LowFreqMuon optimizer")
+        else:
+            raise ValueError(f"Unknown optimizer_name={optimizer_name}")
 
         return optimizer
 

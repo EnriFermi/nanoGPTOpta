@@ -20,6 +20,7 @@ import os
 import time
 import math
 import pickle
+import random
 from contextlib import nullcontext
 
 import numpy as np
@@ -28,6 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+from optim import LowFreqMuon
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -66,6 +68,18 @@ decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
 lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+optimizer_name = 'adamw' # 'adamw', 'muon', or 'lowfreq_muon'
+muon_momentum = 0.95
+muon_nesterov = False
+muon_ns_coefficients = (3.4445, -4.775, 2.0315)
+muon_eps = 1e-7
+muon_ns_steps = 5
+muon_adjust_lr_fn = None
+lowfreq_m = 32
+lowfreq_sigma = 1.0
+lowfreq_lam = 0.5
+lowfreq_scale_match = True
+seed = 1337
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -101,12 +115,18 @@ else:
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+base_seed = seed + seed_offset
+random.seed(base_seed)
+np.random.seed(base_seed)
+torch.manual_seed(base_seed)
+if device_type == 'cuda':
+    torch.cuda.manual_seed(base_seed)
+    torch.cuda.manual_seed_all(base_seed)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
@@ -192,13 +212,36 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
+using_lowfreq = optimizer_name.lower() == 'lowfreq_muon'
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not using_lowfreq))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+optim_kwargs = dict(
+    momentum=muon_momentum,
+    nesterov=muon_nesterov,
+    ns_coefficients=muon_ns_coefficients,
+    eps=muon_eps,
+    ns_steps=muon_ns_steps,
+    adjust_lr_fn=muon_adjust_lr_fn,
+    m=lowfreq_m,
+    sigma=lowfreq_sigma,
+    lam=lowfreq_lam,
+    scale_match=lowfreq_scale_match,
+)
+optimizer = model.configure_optimizers(
+    weight_decay,
+    learning_rate,
+    (beta1, beta2),
+    device_type,
+    optimizer_name=optimizer_name,
+    optimizer_kwargs=optim_kwargs,
+)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
+using_lowfreq = isinstance(optimizer, LowFreqMuon)
+if using_lowfreq and grad_clip != 0.0:
+    optimizer.clip_grad_norm = grad_clip
 checkpoint = None # free up memory
 
 # compile the model
@@ -210,6 +253,8 @@ if compile:
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+    if using_lowfreq:
+        optimizer.ddp_model = model
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -289,29 +334,43 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
-        if ddp:
-            # in DDP training we only need to sync gradients at the last micro step.
-            # the official way to do this is with model.no_sync() context manager, but
-            # I really dislike that this bloats the code and forces us to repeat code
-            # looking at the source of that context manager, it just toggles this variable
-            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-        with ctx:
-            logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+    if using_lowfreq:
+        optimizer.zero_grad(set_to_none=True)
+        micro_outputs = []
+        for micro_step in range(gradient_accumulation_steps):
+            with ctx:
+                logits, micro_loss = model(X, Y)
+                micro_loss = micro_loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            micro_outputs.append((logits, Y, X, micro_loss))
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+        loss = torch.stack([out[3] for out in micro_outputs]).sum()
+        optimizer.step(lambda: micro_outputs)
+        optimizer.zero_grad(set_to_none=True)
+    else:
+        for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                # in DDP training we only need to sync gradients at the last micro step.
+                # the official way to do this is with model.no_sync() context manager, but
+                # I really dislike that this bloats the code and forces us to repeat code
+                # looking at the source of that context manager, it just toggles this variable
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            with ctx:
+                logits, loss = model(X, Y)
+                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
+        # clip the gradient
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # step the optimizer and scaler if training in fp16
+        scaler.step(optimizer)
+        scaler.update()
+        # flush the gradients as soon as we can, no need for this memory anymore
+        optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
     t1 = time.time()
