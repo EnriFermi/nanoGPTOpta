@@ -58,7 +58,8 @@ class LowFreqAdam(torch.optim.Optimizer):
         K = 0.5 * (K + K.t())
         dv = K.diag().clamp_min(1e-12).sqrt()
         Khat = (K / dv).t() / dv
-        return Khat.to(dtype=x.dtype)
+        # keep Khat in floating-point; caller will cast to the gradient dtype
+        return Khat
 
     def zero_grad(self, set_to_none=True):
         self.base.zero_grad(set_to_none=set_to_none)
@@ -71,7 +72,8 @@ class LowFreqAdam(torch.optim.Optimizer):
         """
         B = grad.shape[0]
         r_flat = grad.view(B, -1)
-        Khat = self._khat(x)
+        # ensure Khat matches the gradient dtype/device
+        Khat = self._khat(x).to(dtype=grad.dtype, device=grad.device)
         r_tilde_flat = (1.0 - self.lam) * r_flat + self.lam * (Khat @ r_flat)
         if self.scale_match:
             rn = r_flat.norm()
