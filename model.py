@@ -285,6 +285,23 @@ class GPT(nn.Module):
             extra_args = dict(fused=True) if use_fused else dict()
             optimizer = torch.optim.Adam(optim_groups, lr=learning_rate, betas=betas, **extra_args)
             print(f"using fused Adam: {use_fused}")
+        elif optimizer_name == "adam_custom":
+            from optim import AdamCustom
+
+            optimizer = AdamCustom(
+                optim_groups,
+                lr=learning_rate,
+                betas=betas,
+                eps=optimizer_kwargs.get("eps", 1e-8),
+                weight_decay=weight_decay,
+                amsgrad=optimizer_kwargs.get("amsgrad", False),
+                foreach=optimizer_kwargs.get("foreach", None),
+                maximize=optimizer_kwargs.get("maximize", False),
+                capturable=optimizer_kwargs.get("capturable", False),
+                differentiable=optimizer_kwargs.get("differentiable", False),
+                fused=optimizer_kwargs.get("fused", None),
+            )
+            print("using AdamCustom optimizer")
         elif optimizer_name == "lowfreq_adam":
             from optim import LowFreqAdam
 
