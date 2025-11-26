@@ -332,8 +332,18 @@ while True:
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
             # register hook on logits to shape its gradient
             x_local = X
+
             def _lf_hook(grad, x=x_local):
+                # Under torch.compile or certain graph rewrites, grad for this
+                # particular logits tensor can occasionally be None. In that
+                # case we leave it unchanged so training can proceed.
+                if grad is None:
+                    if not hasattr(optimizer, "_warned_none_grad"):
+                        print("LowFreqAdam: received None grad for logits; leaving it unchanged for this micro-step.")
+                        optimizer._warned_none_grad = True
+                    return grad
                 return optimizer.shape_grad(grad, x)
+
             logits.register_hook(_lf_hook)
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
