@@ -80,7 +80,10 @@ class LowFreqAdam(torch.optim.Optimizer):
                 self.ddp_model.require_backward_grad_sync = (idx == total_outputs - 1)
 
             # dL/dlogits for arbitrary loss
-            r = torch.autograd.grad(loss, logits, retain_graph=True)[0]  # shape [B,...]
+            r = torch.autograd.grad(loss, logits, retain_graph=True, allow_unused=True)[0]  # shape [B,...]
+            if r is None:
+                # If logits were not used in loss (shouldn't happen), skip this chunk.
+                continue
 
             with torch.no_grad():
                 B = logits.size(0)
@@ -111,4 +114,3 @@ class LowFreqAdam(torch.optim.Optimizer):
     def load_state_dict(self, state_dict):
         self.W = state_dict.pop("_lowfreq_W", None)
         self.base.load_state_dict(state_dict)
-
