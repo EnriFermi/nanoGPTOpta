@@ -343,9 +343,10 @@ while True:
             with ctx:
                 logits, loss = model(X, Y)
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            targets = Y
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
-            optimizer.step(lambda: (logits, Y, dict(embed_cache), loss))
+            optimizer.step(lambda: (logits, targets, dict(embed_cache), loss))
         if grad_clip != 0.0:
             params = [p for group in optimizer.base.param_groups for p in group["params"]]
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
