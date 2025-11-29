@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from optim import LowFreqAdam, LowFreqAdamMulti, LowFreqAdamLM
+from optim import LowFreqAdam, LowFreqAdamLM
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -206,9 +206,11 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
-using_lowfreq = optimizer_name.lower() == 'lowfreq_adam'
+opt_name_lower = optimizer_name.lower()
+using_lowfreq = opt_name_lower == 'lowfreq_adam'
+using_lf_flag = opt_name_lower == 'lowfreq_adam_multi'
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not using_lowfreq))
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not (using_lowfreq or using_lf_flag)))
 
 # optimizer
 optim_kwargs = dict(
@@ -228,7 +230,6 @@ optimizer = model.configure_optimizers(
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 using_lowfreq = isinstance(optimizer, LowFreqAdam)
-using_lf_multi = isinstance(optimizer, LowFreqAdamMulti)
 using_lf_lm = isinstance(optimizer, LowFreqAdamLM)
 if using_lowfreq and grad_clip != 0.0:
     optimizer.clip_grad_norm = grad_clip
@@ -288,16 +289,7 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 embed_cache = {}
-if using_lf_multi:
-    target = raw_model.transformer.h
-    for i, block in enumerate(target):
-        name = f"block{i}"
-        def make_hook(key):
-            def hook(mod, inp, out):
-                embed_cache[key] = out.detach()
-            return hook
-        block.register_forward_hook(make_hook(name))
-elif using_lf_lm:
+if using_lf_lm:
     def lm_hook(mod, inp, out):
         embed_cache['h'] = out.detach()
     raw_model.transformer.ln_f.register_forward_hook(lm_hook)
@@ -338,24 +330,7 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    if using_lf_multi:
-        optimizer.zero_grad(set_to_none=True)
-        for micro_step in range(gradient_accumulation_steps):
-            if ddp:
-                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-            embed_cache.clear()
-            with ctx:
-                logits, loss = model(X, Y)
-                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            targets = Y
-            # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y = get_batch('train')
-            optimizer.step(lambda: (logits, targets, dict(embed_cache), loss))
-        if grad_clip != 0.0:
-            params = [p for group in optimizer.base.param_groups for p in group["params"]]
-            torch.nn.utils.clip_grad_norm_(params, grad_clip)
-        optimizer.zero_grad(set_to_none=True)
-    elif using_lf_lm:
+    if using_lf_lm:
         optimizer.zero_grad(set_to_none=True)
         for micro_step in range(gradient_accumulation_steps):
             if ddp:
