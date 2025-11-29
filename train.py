@@ -346,7 +346,7 @@ while True:
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
             optimizer.step(lambda: (logits, Y, dict(embed_cache), loss))
-        if grad_clip != 0.0 and optimizer.clip_grad_norm is not None:
+        if grad_clip != 0.0:
             params = [p for group in optimizer.base.param_groups for p in group["params"]]
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         optimizer.zero_grad(set_to_none=True)
