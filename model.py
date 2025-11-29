@@ -322,20 +322,23 @@ class GPT(nn.Module):
             )
             print("using LowFreqAdam optimizer")
         elif optimizer_name == "lowfreq_adam_multi":
-            from optim import LowFreqAdamMulti
+            from optim import LowFreqAdamLM
 
-            optimizer = LowFreqAdamMulti(
+            optimizer = LowFreqAdamLM(
                 optim_groups,
                 lr=learning_rate,
                 betas=betas,
                 eps=optimizer_kwargs.get("eps", 1e-8),
                 wd=weight_decay,
-                specs=optimizer_kwargs.get("specs", None),
-                lam=optimizer_kwargs.get("lam", 0.5),
-                scale_match=optimizer_kwargs.get("scale_match", True),
+                m=optimizer_kwargs.get("m", 8),
+                sigma=optimizer_kwargs.get("sigma", 0.8),
+                lam=optimizer_kwargs.get("lam", 0.3),
                 N_images=optimizer_kwargs.get("N_images", 0),
+                window=optimizer_kwargs.get("window", None),
+                scale_match=optimizer_kwargs.get("scale_match", True),
+                lam_warmup=optimizer_kwargs.get("lam_warmup", 200),
             )
-            print("using LowFreqAdamMulti optimizer")
+            print("using LowFreqAdamLM optimizer")
         else:
             raise ValueError(f"Unknown optimizer_name={optimizer_name}")
 
