@@ -331,23 +331,45 @@ while True:
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     if using_lf_lm:
+        # before training: optimizer = LowFreqAdamChunked(model.parameters(), m=8, sigma=0.8, lam=0.2)
         optimizer.zero_grad(set_to_none=True)
-        for micro_step in range(gradient_accumulation_steps):
-            if ddp:
-                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-            embed_cache.clear()
-            with ctx:
-                logits, loss = model(X, Y)
-                loss = loss / gradient_accumulation_steps
-            targets = Y
-            if 'h' not in embed_cache:
-                raise RuntimeError("LowFreqAdamLM requires 'h' embeddings captured via hook.")
-            embeds = {'h': embed_cache['h']}
-            X, Y = get_batch('train')
-            optimizer.step(lambda: (logits, targets, embeds, loss))
-        if grad_clip != 0.0:
-            params = [p for group in optimizer.base.param_groups for p in group["params"]]
+
+        # prefetch first micro-batch
+        X, Y = get_batch('train')
+
+        for micro in range(gradient_accumulation_steps):
+            # DDP: allreduce only on the last micro step
+            autocast_dtype=None
+            sync_ctx = model.no_sync() if ddp and hasattr(model, "no_sync") and micro < gradient_accumulation_steps - 1 else nullcontext()
+            amp_ctx = torch.autocast(device_type='cuda', dtype=autocast_dtype) if (autocast_dtype and torch.cuda.is_available()) else nullcontext()
+
+            with sync_ctx:
+                embed_cache.clear()
+                with amp_ctx:
+                    logits, _ = model(X, Y)  # loss not needed; we supply custom grad to logits
+
+                if 'h' not in embed_cache:
+                    raise RuntimeError("LF optimizer requires 'h' in embed_cache (register a forward hook).")
+
+                # accumulate scaled custom gradient for this micro-batch (no step)
+                optimizer.accumulate(
+                    logits=logits,
+                    y=Y,
+                    embeds={'h': embed_cache['h']},
+                    scale=1.0 / gradient_accumulation_steps
+                )
+
+            # prefetch next micro-batch for the next loop (keeps pipeline full)
+            if micro != gradient_accumulation_steps - 1:
+                X, Y = get_batch('train')
+
+        # clip AFTER accumulation, BEFORE the single update
+        if grad_clip and grad_clip > 0:
+            params = [p for g in optimizer.base.param_groups for p in g['params'] if p.grad is not None]
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
+
+        # single optimizer update
+        optimizer.step_base()
         optimizer.zero_grad(set_to_none=True)
     elif using_lowfreq:
         optimizer.zero_grad(set_to_none=True)

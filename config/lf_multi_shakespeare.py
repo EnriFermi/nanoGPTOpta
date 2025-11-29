@@ -24,13 +24,13 @@ max_iters = 5000
 lr_decay_iters = 5000
 min_lr = 1e-4
 beta2 = 0.99
-warmup_iters = 100
+warmup_iters = 0
 
 optimizer_name = 'lowfreq_adam_multi'
 optimizer_kwargs = {
     "m": 16,
     "sigma": 0.8,
-    "lam": 0.3,
+    "lam": 0.5,
     "N_images": 0,
     "window": None,
     "scale_match": True,
