@@ -354,7 +354,7 @@ while True:
                 raise RuntimeError("LowFreqAdamLM requires 'h' embeddings. Ensure hook captured them.")
             embeds = {'h': embed_cache['h']}
             X, Y = get_batch('train')
-            optimizer.step(lambda: (logits, targets, embeds, loss))
+            optimizer.step(lambda: (logits, targets, embeds, loss), log=(iter_num % 20 == 0))
         optimizer.zero_grad(set_to_none=True)
     elif using_lowfreq:
         optimizer.zero_grad(set_to_none=True)

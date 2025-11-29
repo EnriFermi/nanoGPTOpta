@@ -28,6 +28,6 @@ warmup_iters = 100
 
 optimizer_name = 'lowfreq_adam_multi'
 lowfreq_m = 16
-lowfreq_sigma = 0.8
-lowfreq_lam = 0.5
+lowfreq_sigma = 2.0
+lowfreq_lam = 0.15
 lowfreq_scale_match = True
