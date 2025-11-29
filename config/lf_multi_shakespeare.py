@@ -27,7 +27,25 @@ beta2 = 0.99
 warmup_iters = 100
 
 optimizer_name = 'lowfreq_adam_multi'
-lowfreq_m = 16
-lowfreq_sigma = 2.0
-lowfreq_lam = 0.15
-lowfreq_scale_match = True
+layer_specs = [
+    {
+        "name": f"block{i}",
+        "module": f"transformer.h.{i}",
+        "embed_module": f"transformer.h.{i}",
+        "embed_key": f"block{i}",
+        "m": 16,
+        "sigma": 0.8,
+    }
+    for i in range(n_layer)
+]
+
+optimizer_kwargs = {
+    "layer_specs": layer_specs,
+    "lam": 0.15,
+    "degree_norm": True,
+    "chunked": False,
+    "row_chunk": 512,
+    "col_chunk": 2048,
+    "scale_match": True,
+    "lam_warmup": 0,
+}

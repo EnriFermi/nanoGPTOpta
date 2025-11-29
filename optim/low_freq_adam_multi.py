@@ -1,24 +1,12 @@
+# low_freq_adam_perlayer.py
 import math, torch
 from torch.optim import Adam
 
-def wrap(ang):
-    return (ang + math.pi) % (2*math.pi) - math.pi  # [-pi, pi)
+def wrap(a):  # map to [-pi, pi)
+    return (a + math.pi) % (2*math.pi) - math.pi
 
 @torch.no_grad()
-def torus_rbf(theta, sigma, degree_norm=True, eps=1e-12):
-    # theta: [N, m] in [-pi,pi)
-    theta64 = theta if theta.dtype == torch.float64 else theta.to(torch.float64)
-    d = wrap(theta64[:, None, :] - theta64[None, :, :])               # [N,N,m]
-    K = torch.exp(-(d.pow(2).sum(-1)) / (2.0 * (float(sigma) ** 2)))  # [N,N]
-    K = 0.5 * (K + K.t())
-    if degree_norm:
-        dv = K.diag().clamp_min(eps).sqrt()
-        K = (K / dv).t() / dv
-    return K.to(theta.dtype)
-
-@torch.no_grad()
-def pca_init_rows(Z, m):
-    # Z: [N,D] (float32 recommended for SVD speed)
+def pca_rows(Z, m):
     Zf = Z.to(torch.float32)
     Zc = Zf - Zf.mean(0, keepdim=True)
     _,_,Vh = torch.linalg.svd(Zc, full_matrices=False)
@@ -26,105 +14,157 @@ def pca_init_rows(Z, m):
     std = (Zc @ W.t()).std(0).clamp_min(1e-3)
     return (W / std[:,None]).contiguous()
 
-class LowFreqAdamMulti(torch.optim.Optimizer):
+@torch.no_grad()
+def torus_rbf_Khat(theta, sigma, degree_norm=True):
+    # theta: [N,m]; returns \hat K (degree-normalized) in float64 for stability
+    th = theta if theta.dtype==torch.float64 else theta.to(torch.float64)
+    d  = wrap(th[:,None,:] - th[None,:,:])                  # [N,N,m]
+    K  = torch.exp(-(d.pow(2).sum(-1)) / (2.0*(sigma**2)))  # [N,N]
+    K  = 0.5*(K + K.t())
+    if degree_norm:
+        dv = K.diag().clamp_min(1e-12).sqrt()
+        K  = (K / dv).t() / dv
+    return K
+
+@torch.no_grad()
+def _kernel_block(theta_I, theta_J, sigma):
+    I = theta_I.size(0); J = theta_J.size(0)
+    thI = theta_I.to(torch.float64); thJ = theta_J.to(torch.float64)
+    d   = wrap(thI[:,None,:] - thJ[None,:,:])                     # [I,J,m]
+    return torch.exp(-(d.pow(2).sum(-1)) / (2.0*(sigma**2)))      # [I,J]
+
+@torch.no_grad()
+def rbf_Khat_matvec(theta, v, sigma, degree_norm=True, row_chunk=512, col_chunk=2048):
+    # y = \hat K v without building K; theta:[N,m], v:[N,C] (float32/16 ok)
+    N, m = theta.shape; C = v.size(1)
+    th = theta.to(torch.float64); vv = v.to(torch.float64)
+    # degree vector d_i = sum_j K_ij
+    d = torch.zeros(N, dtype=torch.float64, device=th.device)
+    for i0 in range(0, N, row_chunk):
+        i1 = min(i0+row_chunk, N)
+        acc = torch.zeros(i1-i0, dtype=torch.float64, device=th.device)
+        for j0 in range(0, N, col_chunk):
+            j1 = min(j0+col_chunk, N)
+            acc += _kernel_block(th[i0:i1], th[j0:j1], sigma).sum(1)
+        d[i0:i1] = acc
+    d.clamp_min_(1e-12)
+    invsqrt_d = d.rsqrt()
+    u = vv * invsqrt_d.view(N,1)
+    y = torch.zeros(N, C, dtype=torch.float64, device=th.device)
+    for i0 in range(0, N, row_chunk):
+        i1 = min(i0+row_chunk, N)
+        acc = torch.zeros(i1-i0, C, dtype=torch.float64, device=th.device)
+        for j0 in range(0, N, col_chunk):
+            j1 = min(j0+col_chunk, N)
+            Kblk = _kernel_block(th[i0:i1], th[j0:j1], sigma)
+            acc += Kblk @ u[j0:j1]
+        y[i0:i1] = acc * invsqrt_d[i0:i1].view(-1,1)
+    return y.to(v.dtype)
+
+@torch.no_grad()
+def safe_mix(r, Kr, lam):
+    # ensure ||(1-λ)r + λKr|| <= ||r||, arbitrary r,Kr with same shape
+    rr = (r*r).sum().clamp_min(1e-12)
+    a  = (r*Kr).sum() / rr
+    b  = (Kr*Kr).sum() / rr
+    den = (b + 1.0 - 2.0*a).clamp_min(1e-12)
+    lam_max = (2.0*(1.0 - a) / den).clamp(min=0.0, max=1.0)
+    lam_eff = torch.minimum(torch.as_tensor(lam, device=r.device, dtype=r.dtype), lam_max)
+    return (1.0 - lam_eff) * r + lam_eff * Kr
+
+class LowFreqAdamPerLayer(torch.optim.Optimizer):
     """
-    Torus-Gaussian LF-Adam with per-layer kernels.
-    Works for:
-      classification: logits [B,C], embeds[name] [B,D]
-      language model: logits [B,T,C], embeds[name] [B,T,D]
-    No giant [BT,BT] kernels; applies K per sequence when T is present.
-    specs: dict name -> {"m": int, "sigma": float, "alpha": float}
+    Per-layer LF Adam with arbitrary loss and per-layer kernels.
+    You pass a 'layer_specs' dict:
+      layer_specs[name] = {
+         'params': list_of_parameters_for_this_layer,
+         'embed_key': name_in_embeds_dict,           # embeds[embed_key] -> [B,D] or [B,T,D]
+         'm': int, 'sigma': float, 'alpha': float    # alpha used only if you aggregate, else ignored
+      }
+    For each layer ℓ, we compute r_base = d(loss)/d(logits). Then r̃_ℓ = (1-λ)r_base + λ ( \hat K_ℓ r_base ),
+    and call autograd.grad(logits, params_ℓ, grad_outputs=r̃_ℓ), accumulating only on that layer’s params.
     """
-    def __init__(self, params, lr=1e-3, betas=(0.9,0.999), eps=1e-8, wd=0.0,
-                 specs=None, lam=0.5, scale_match=True, degree_norm=True):
-        self.base = Adam(params, lr=lr, betas=betas, eps=eps, weight_decay=wd)
-        self.specs = specs or {}
-        self.W = {}  # name -> [m,D]
+    def __init__(self, params, layer_specs, lr=1e-3, betas=(0.9,0.999), eps=1e-8, weight_decay=0.0,
+                 lam=0.3, degree_norm=True, chunked=False, row_chunk=512, col_chunk=2048,
+                 scale_match=False, lam_warmup=0):
+        self.base = Adam(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.specs = layer_specs
+        self.W = {name: None for name in layer_specs}    # per-layer W
         self.lam = float(lam)
-        self.scale_match = bool(scale_match)
         self.degree_norm = bool(degree_norm)
+        self.scale_match = bool(scale_match)
+        self.lam_warmup = int(lam_warmup)
+        self.step_id = 0
+        self.chunked = bool(chunked)
+        self.row_chunk, self.col_chunk = int(row_chunk), int(col_chunk)
         super().__init__(self.base.param_groups, self.base.defaults)
 
-    @torch.no_grad()
-    def _ensure_W(self, name, Z2d):
-        if name not in self.W:
-            self.W[name] = pca_init_rows(Z2d, int(self.specs[name]["m"])).to(Z2d.device, Z2d.dtype)
+    @staticmethod
+    def _flatten_logits_and_targets(logits, y):
+        if logits.dim() == 3:
+            B,T,C = logits.shape
+            return logits.reshape(B*T, C), y.reshape(B*T), (B,T,C)
+        else:
+            B,C = logits.shape
+            return logits, y, (B,1,C)
 
     @torch.no_grad()
-    def _apply_Kbar(self, embeds, r, B=None, T=None):
-        # r: [N,C] where N=B or N=B*T
-        if B is None:  # classification case
-            Ksum, asum = None, 0.0
-            for name, Z in embeds.items():
-                if name not in self.specs: continue
-                spec = self.specs[name]
-                alpha = float(spec["alpha"])
-                if alpha == 0: continue
-                Z2d = Z  # [B,D]
-                self._ensure_W(name, Z2d)
-                theta = wrap(2*math.pi * (Z2d @ self.W[name].t()))
-                K = torus_rbf(theta, sigma=float(spec["sigma"]), degree_norm=self.degree_norm).to(Z2d.dtype)
-                Ksum = alpha * K if Ksum is None else (Ksum + alpha * K)
-                asum += alpha
-            if Ksum is None or asum == 0: return r
-            return (Ksum / asum) @ r
-
-        # language model: apply per sequence to avoid [BT,BT]
-        C = r.size(1)
-        out = torch.zeros_like(r)
-        for b in range(B):
-            Ksum_b, asum_b = None, 0.0
-            for name, Z in embeds.items():
-                if name not in self.specs: continue
-                spec = self.specs[name]; alpha = float(spec["alpha"])
-                if alpha == 0: continue
-                Zb = Z[b]              # [T,D]
-                self._ensure_W(name, Zb)
-                theta_b = wrap(2*math.pi * (Zb @ self.W[name].t()))  # [T,m]
-                Kb = torus_rbf(theta_b, sigma=float(spec["sigma"]), degree_norm=self.degree_norm).to(Zb.dtype)  # [T,T]
-                Ksum_b = alpha * Kb if Ksum_b is None else (Ksum_b + alpha * Kb)
-                asum_b += alpha
-            if Ksum_b is None or asum_b == 0:
-                out[b*T:(b+1)*T] = r[b*T:(b+1)*T]
-            else:
-                Kbar_b = (Ksum_b / asum_b)                             # [T,T]
-                out[b*T:(b+1)*T] = Kbar_b @ r[b*T:(b+1)*T]              # [T,C]
-        return out
+    def _prepare_theta(self, name, Z2d, m, sigma):
+        if self.W[name] is None:
+            self.W[name] = pca_rows(Z2d, m).to(Z2d.dtype, Z2d.device)
+        theta = wrap(2*math.pi * (Z2d @ self.W[name].t()))  # [N,m]
+        return theta
 
     def zero_grad(self, set_to_none=True):
         self.base.zero_grad(set_to_none=set_to_none)
 
-    def step(self, closure):
-        # closure must return: logits, y, embeds(dict name->tensor), loss
-        logits, y, embeds, loss = closure()
+    def accumulate(self, logits, y, embeds, loss, scale=1.0):
+        # Works with arbitrary loss (scalar or mean of per-sample). We use autograd.grad to get dL/dlogits.
+        logits_f, y_f, shape_info = self._flatten_logits_and_targets(logits, y)  # [N,C], [N]
+        N, C = logits_f.shape
 
-        # figure out shapes and flatten if LM
-        if logits.dim() == 3:
-            B, T, C = logits.shape
-            logits_f = logits.reshape(B*T, C)
-            y_f = y.reshape(B*T)
-            # make sure all embeds[name] are 3D and we keep them that way; _apply_Kbar will index per b
-            embeds_use = {k: v.detach() for k, v in embeds.items()}
-            Binfo, Tinfo = B, T
-        else:
-            B, C = logits.shape
-            logits_f = logits
-            y_f = y
-            # ensure 2D embeds
-            embeds_use = {k: v.detach() for k, v in embeds.items()}
-            Binfo, Tinfo = None, None
+        # derivative of the actual loss wrt logits (no CE assumptions)
+        r_base = torch.autograd.grad(
+            outputs=loss, inputs=logits, grad_outputs=torch.ones_like(loss),
+            retain_graph=True, create_graph=False, allow_unused=False
+        )[0].detach()                   # same shape as logits
+        r_base = r_base.reshape(N, C)
 
-        with torch.no_grad():
-            N = logits_f.size(0)
-            p = logits_f.softmax(1)
-            r = p
-            r[torch.arange(N, device=logits.device), y_f] -= 1.0
-            r /= N
-            Kr = self._apply_Kbar(embeds_use, r, B=Binfo, T=Tinfo)
-            r_tilde = (1.0 - self.lam) * r + self.lam * Kr
+        lam_eff = self.lam * (min(1.0, (self.step_id + 1)/max(1,self.lam_warmup)) if self.lam_warmup>0 else 1.0)
+
+        # per-layer pass: build Khat_ℓ from layer's embedding and apply only to that layer's params
+        for name, spec in self.specs.items():
+            if spec.get('params', None) is None: 
+                continue
+            Z = embeds[spec['embed_key']]
+            Z2d = Z.reshape(N, -1).detach()
+            theta = self._prepare_theta(name, Z2d, int(spec['m']), float(spec['sigma']))
+
+            if self.chunked:
+                Kr = rbf_Khat_matvec(theta, r_base, sigma=float(spec['sigma']),
+                                      degree_norm=self.degree_norm,
+                                      row_chunk=self.row_chunk, col_chunk=self.col_chunk)
+            else:
+                Khat = torus_rbf_Khat(theta, sigma=float(spec['sigma']), degree_norm=self.degree_norm)
+                Kr = (Khat @ r_base.to(torch.float64)).to(r_base.dtype)
+
+            r_tilde = safe_mix(r_base, Kr, lam_eff)
             if self.scale_match:
-                r_tilde *= (r.norm() / (r_tilde.norm() + 1e-12)).detach()
+                r_tilde *= (r_base.norm() / (r_tilde.norm() + 1e-12)).detach()
+            r_tilde_full = r_tilde.reshape(*shape_info)
 
-        logits_f.backward(gradient=r_tilde.to(logits.dtype))
+            grads = torch.autograd.grad(
+                outputs=logits, inputs=spec['params'],
+                grad_outputs=r_tilde_full, retain_graph=True, allow_unused=True
+            )
+            for p, g in zip(spec['params'], grads):
+                if g is None: 
+                    continue
+                if p.grad is None:
+                    p.grad = (g * float(scale)).detach()
+                else:
+                    p.grad.add_((g * float(scale)).detach())
+
+    def step_base(self):
         self.base.step()
-        return loss
+        self.step_id += 1

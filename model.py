@@ -342,20 +342,55 @@ class GPT(nn.Module):
             )
             print("using LowFreqAdam optimizer")
         elif optimizer_name == "lowfreq_adam_multi":
-            from optim import LowFreqAdamLM
+            from optim import LowFreqAdamPerLayer
 
-            optimizer = LowFreqAdamLM(
-                optim_groups,
+            spec_cfg = optimizer_kwargs.get("layer_specs")
+            if not spec_cfg:
+                raise ValueError("lowfreq_adam_multi requires optimizer_kwargs['layer_specs']")
+
+            def resolve_module(root, path):
+                mod = root
+                for attr in path.split('.'):
+                    if attr.isdigit():
+                        mod = mod[int(attr)]
+                    else:
+                        mod = getattr(mod, attr)
+                return mod
+
+            layer_specs = {}
+            embed_paths = {}
+            for layer_spec in spec_cfg:
+                name = layer_spec["name"]
+                module_path = layer_spec["module"]
+                embed_key = layer_spec["embed_key"]
+                embed_module_path = layer_spec.get("embed_module", module_path)
+                module = resolve_module(self, module_path)
+                params = [p for p in module.parameters()]
+                layer_specs[name] = {
+                    "params": params,
+                    "embed_key": embed_key,
+                    "m": layer_spec.get("m", optimizer_kwargs.get("m", 8)),
+                    "sigma": layer_spec.get("sigma", optimizer_kwargs.get("sigma", 0.8)),
+                }
+                embed_paths[embed_key] = embed_module_path
+
+            optimizer = LowFreqAdamPerLayer(
+                self.parameters(),
+                layer_specs=layer_specs,
                 lr=learning_rate,
                 betas=betas,
                 eps=optimizer_kwargs.get("eps", 1e-8),
-                wd=weight_decay,
-                specs=optimizer_kwargs.get("specs", None),
-                lam=optimizer_kwargs.get("lam", 0.5),
-                scale_match=optimizer_kwargs.get("scale_match", True),
+                weight_decay=weight_decay,
+                lam=optimizer_kwargs.get("lam", 0.3),
                 degree_norm=optimizer_kwargs.get("degree_norm", True),
+                chunked=optimizer_kwargs.get("chunked", False),
+                row_chunk=optimizer_kwargs.get("row_chunk", 512),
+                col_chunk=optimizer_kwargs.get("col_chunk", 2048),
+                scale_match=optimizer_kwargs.get("scale_match", False),
+                lam_warmup=optimizer_kwargs.get("lam_warmup", 0),
             )
-            print("using LowFreqAdamLM optimizer")
+            optimizer.embed_paths = embed_paths
+            print("using LowFreqAdamPerLayer optimizer")
         else:
             raise ValueError(f"Unknown optimizer_name={optimizer_name}")
 
