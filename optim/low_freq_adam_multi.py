@@ -47,7 +47,7 @@ def build_block_kernel(Z, W, m, sigma, N=0, window=None):
             # PCA init rows for this sequence
             Zc = Zb - Zb.mean(0, keepdim=True)
             _,_,Vh = torch.linalg.svd(Zc.to(torch.float32), full_matrices=False)
-            Wb = (Vh[:m,:]).to(Zb.dtype, Zb.device)
+            Wb = Vh[:m,:].to(device=Zb.device, dtype=Zb.dtype)
             std = (Zc @ Wb.t()).std(0).clamp_min(1e-3)
             Wb = (Wb / std[:,None]).contiguous()
         else:
