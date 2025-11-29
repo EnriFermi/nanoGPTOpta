@@ -350,12 +350,11 @@ class GPT(nn.Module):
                 betas=betas,
                 eps=optimizer_kwargs.get("eps", 1e-8),
                 wd=weight_decay,
-                # m=optimizer_kwargs.get("m", 8),
-                # sigma=optimizer_kwargs.get("sigma", 0.8),
-                lam=optimizer_kwargs.get("lam", 0.3),
-                specs=optimizer_kwargs.get('specs', None),
-                # N_images=optimizer_kwargs.get("N_images", 0)
-                            )
+                specs=optimizer_kwargs.get("specs", None),
+                lam=optimizer_kwargs.get("lam", 0.5),
+                scale_match=optimizer_kwargs.get("scale_match", True),
+                degree_norm=optimizer_kwargs.get("degree_norm", True),
+            )
             print("using LowFreqAdamLM optimizer")
         else:
             raise ValueError(f"Unknown optimizer_name={optimizer_name}")

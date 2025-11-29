@@ -208,17 +208,27 @@ model.to(device)
 
 opt_name_lower = optimizer_name.lower()
 using_lowfreq = opt_name_lower == 'lowfreq_adam'
-using_lf_flag = opt_name_lower == 'lowfreq_adam_multi'
+using_lf_lm_flag = opt_name_lower == 'lowfreq_adam_multi'
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not (using_lowfreq or using_lf_flag)))
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not (using_lowfreq or using_lf_lm_flag)))
 
 # optimizer
-optim_kwargs = dict(
-    m=lowfreq_m,
-    sigma=lowfreq_sigma,
-    lam=lowfreq_lam,
-    scale_match=lowfreq_scale_match,
-)
+if opt_name_lower == 'lowfreq_adam':
+    optim_kwargs = dict(
+        m=lowfreq_m,
+        sigma=lowfreq_sigma,
+        lam=lowfreq_lam,
+        scale_match=lowfreq_scale_match,
+    )
+elif opt_name_lower == 'lowfreq_adam_multi':
+    optim_kwargs = dict(
+        specs={"h": {"m": lowfreq_m, "sigma": lowfreq_sigma, "alpha": 1.0}},
+        lam=lowfreq_lam,
+        scale_match=lowfreq_scale_match,
+        degree_norm=True,
+    )
+else:
+    optim_kwargs = {}
 optimizer = model.configure_optimizers(
     weight_decay,
     learning_rate,
