@@ -288,7 +288,7 @@ class GPT(nn.Module):
         elif optimizer_name == "adam_custom":
             from optim import AdamCustom
 
-            custom_lr = learning_rate * math.sqrt(2.0)
+            custom_lr = learning_rate / math.sqrt(2.0)
             optimizer = AdamCustom(
                 optim_groups,
                 lr=custom_lr,
@@ -341,6 +341,21 @@ class GPT(nn.Module):
                 **lf_kwargs,
             )
             print("using LowFreqAdam optimizer")
+        elif optimizer_name == "lowfreq_adam_multi":
+            from optim import LowFreqAdamMulti
+
+            optimizer = LowFreqAdamMulti(
+                optim_groups,
+                lr=learning_rate,
+                betas=betas,
+                eps=optimizer_kwargs.get("eps", 1e-8),
+                wd=weight_decay,
+                specs=optimizer_kwargs.get("specs", None),
+                lam=optimizer_kwargs.get("lam", 0.5),
+                scale_match=optimizer_kwargs.get("scale_match", True),
+                N_images=optimizer_kwargs.get("N_images", 0),
+            )
+            print("using LowFreqAdamMulti optimizer")
         else:
             raise ValueError(f"Unknown optimizer_name={optimizer_name}")
 
