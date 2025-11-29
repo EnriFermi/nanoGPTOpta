@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from optim import LowFreqAdam, LowFreqAdamMulti
+from optim import LowFreqAdam, LowFreqAdamMulti, LowFreqAdamLM
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -229,6 +229,7 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 using_lowfreq = isinstance(optimizer, LowFreqAdam)
 using_lf_multi = isinstance(optimizer, LowFreqAdamMulti)
+using_lf_lm = isinstance(optimizer, LowFreqAdamLM)
 if using_lowfreq and grad_clip != 0.0:
     optimizer.clip_grad_norm = grad_clip
 checkpoint = None # free up memory
@@ -286,7 +287,6 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
-# register forward hooks to collect per-block embeddings for LowFreqAdamMulti
 embed_cache = {}
 if using_lf_multi:
     target = raw_model.transformer.h
@@ -297,6 +297,10 @@ if using_lf_multi:
                 embed_cache[key] = out.detach()
             return hook
         block.register_forward_hook(make_hook(name))
+elif using_lf_lm:
+    def lm_hook(mod, inp, out):
+        embed_cache['h'] = out.detach()
+    raw_model.transformer.ln_f.register_forward_hook(lm_hook)
 while True:
 
     # determine and set the learning rate for this iteration
@@ -347,6 +351,25 @@ while True:
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
             optimizer.step(lambda: (logits, targets, dict(embed_cache), loss))
+        if grad_clip != 0.0:
+            params = [p for group in optimizer.base.param_groups for p in group["params"]]
+            torch.nn.utils.clip_grad_norm_(params, grad_clip)
+        optimizer.zero_grad(set_to_none=True)
+    elif using_lf_lm:
+        optimizer.zero_grad(set_to_none=True)
+        for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            embed_cache.clear()
+            with ctx:
+                logits, loss = model(X, Y)
+                loss = loss / gradient_accumulation_steps
+            targets = Y
+            if 'h' not in embed_cache:
+                raise RuntimeError("LowFreqAdamLM requires 'h' embeddings captured via hook.")
+            embeds = {'h': embed_cache['h']}
+            X, Y = get_batch('train')
+            optimizer.step(lambda: (logits, targets, embeds, loss))
         if grad_clip != 0.0:
             params = [p for group in optimizer.base.param_groups for p in group["params"]]
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
