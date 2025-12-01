@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from optim import LowFreqAdam, LowFreqAdamPerLayer
+from optim import LowFreqAdam, LowFreqAdamPerLayer, LowFreqAdamDirichlet
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -209,8 +209,9 @@ model.to(device)
 opt_name_lower = optimizer_name.lower()
 using_lowfreq = opt_name_lower == 'lowfreq_adam'
 using_lf_perlayer_flag = opt_name_lower == 'lowfreq_adam_multi'
+using_lf_dirichlet_flag = opt_name_lower == 'lowfreq_adam_multi' and not globals().get("optimizer_kwargs", {}).get("layer_specs")
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not (using_lowfreq or using_lf_perlayer_flag)))
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16' and not (using_lowfreq or using_lf_perlayer_flag or using_lf_dirichlet_flag)))
 
 # optimizer kwargs
 configured_optimizer_kwargs = globals().get("optimizer_kwargs", None)
@@ -237,6 +238,7 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 using_lowfreq = isinstance(optimizer, LowFreqAdam)
 using_lf_perlayer = isinstance(optimizer, LowFreqAdamPerLayer)
+using_lf_dirichlet = isinstance(optimizer, LowFreqAdamDirichlet)
 if using_lowfreq and grad_clip != 0.0:
     optimizer.clip_grad_norm = grad_clip
 checkpoint = None # free up memory
@@ -384,6 +386,18 @@ while True:
             params = [p for group in optimizer.base.param_groups for p in group["params"] if p.grad is not None]
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         optimizer.step_base()
+        optimizer.zero_grad(set_to_none=True)
+    elif using_lf_dirichlet:
+        optimizer.zero_grad(set_to_none=True)
+        for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            with ctx:
+                logits, loss = model(X, Y)
+                loss = loss / gradient_accumulation_steps
+            targets = Y
+            X, Y = get_batch('train')
+            optimizer.step(lambda: (logits, targets, None, loss))
         optimizer.zero_grad(set_to_none=True)
     elif using_lowfreq:
         optimizer.zero_grad(set_to_none=True)
