@@ -155,6 +155,10 @@ if args.wandb:
     wandb.init(project="TWA")
     date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) 
     wandb.run.name = args.EXP + date
+    wandb.define_metric("epoch")
+    wandb.define_metric("train_*", step_metric="epoch")
+    wandb.define_metric("val_*", step_metric="epoch")
+    wandb.define_metric("lf/*", step_metric="lf_step")
 
 def get_model_param_vec(model):
     # Return the model parameters as a vector
@@ -514,20 +518,20 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
         lr_scheduler.step()
 
         if lf_hook and lf_obj is not None and args.wandb:
-            try:
-                import wandb  # type: ignore
-                stats = getattr(lf_obj, "last_kernel_stats", None)
-                if stats:
+            stats = getattr(lf_obj, "last_kernel_stats", None)
+            if stats:
+                try:
+                    import wandb  # type: ignore
                     wandb.log(
                         {
+                            "lf_step": global_step,
                             "lf/k_norm": stats.get("k_norm"),
                             "lf/k_off_norm": stats.get("k_off_norm"),
                             "lf/k_diag_sqrt_sum": stats.get("k_diag_sqrt_sum"),
-                        },
-                        step=global_step,
+                        }
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         total_loss += loss.item() * input_var.shape[0]
         total_err += (output.max(dim=1)[1] != target_var).sum().item()
@@ -564,6 +568,7 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
         import wandb  # type: ignore
         wandb.log(
             {
+                "epoch": epoch,
                 "train loss": total_loss / len(train_loader.dataset),
                 "train acc": 1 - total_err / len(train_loader.dataset),
             },
@@ -635,6 +640,7 @@ def validate(val_loader, model, criterion, wandb_step=None):
         import wandb  # type: ignore
         wandb.log(
             {
+                "epoch": wandb_step,
                 "test loss": total_loss / len(val_loader.dataset),
                 "test acc": 1 - total_err / len(val_loader.dataset),
             },
