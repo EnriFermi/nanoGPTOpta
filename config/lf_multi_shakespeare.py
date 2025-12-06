@@ -33,7 +33,7 @@ layer_specs = [
         "module": f"transformer.h.{i}",
         "embed_module": f"transformer.h.{i}",
         "embed_key": f"block{i}",
-        "m": 16,
+        "m": 4,
         "sigma": 0.8,
     }
     for i in range(n_layer)
@@ -41,7 +41,7 @@ layer_specs = [
 
 optimizer_kwargs = {
     "layer_specs": layer_specs,
-    "lam": 0.15,
+    "lam": 1.0,
     "degree_norm": True,
     "chunked": False,
     "row_chunk": 512,

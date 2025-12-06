@@ -1,6 +1,6 @@
 # low_freq_adam_perlayer.py
 import math, torch
-from torch.optim import Adam
+from torch.optim import AdamW
 
 def wrap(a):  # map to [-pi, pi)
     return (a + math.pi) % (2*math.pi) - math.pi
@@ -10,7 +10,7 @@ def pca_rows(Z, m):
     Zf = Z.to(torch.float32)
     Zc = Zf - Zf.mean(0, keepdim=True)
     _,_,Vh = torch.linalg.svd(Zc, full_matrices=False)
-    W = Vh[:m,:].to(Z.dtype, Z.device)
+    W = Vh[:m,:].to(dtype=Z.dtype, device=Z.device)
     std = (Zc @ W.t()).std(0).clamp_min(1e-3)
     return (W / std[:,None]).contiguous()
 
@@ -87,7 +87,7 @@ class LowFreqAdamPerLayer(torch.optim.Optimizer):
     def __init__(self, params, layer_specs, lr=1e-3, betas=(0.9,0.999), eps=1e-8, weight_decay=0.0,
                  lam=0.3, degree_norm=True, chunked=False, row_chunk=512, col_chunk=2048,
                  scale_match=False, lam_warmup=0):
-        self.base = Adam(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.base = AdamW(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         self.specs = layer_specs
         self.W = {name: None for name in layer_specs}    # per-layer W
         self.lam = float(lam)
@@ -111,7 +111,7 @@ class LowFreqAdamPerLayer(torch.optim.Optimizer):
     @torch.no_grad()
     def _prepare_theta(self, name, Z2d, m, sigma):
         if self.W[name] is None:
-            self.W[name] = pca_rows(Z2d, m).to(Z2d.dtype, Z2d.device)
+            self.W[name] = pca_rows(Z2d, m).to(dtype=Z2d.dtype, device=Z2d.device)
         theta = wrap(2*math.pi * (Z2d @ self.W[name].t()))  # [N,m]
         return theta
 
