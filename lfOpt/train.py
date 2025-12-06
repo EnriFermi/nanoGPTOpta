@@ -412,7 +412,8 @@ def main():
 
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion)
+        val_step = (epoch + 1) * len(train_loader) - 1
+        prec1 = validate(val_loader, model, criterion, wandb_step=val_step)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -462,6 +463,7 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
     post_total_loss, post_total_err = 0, 0
     ori_total_loss, ori_total_err = 0, 0
     
+    base_step = epoch * len(train_loader)
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
 
@@ -473,6 +475,8 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
         target_var = target
         if args.half:
             input_var = input_var.half()
+
+        global_step = base_step + i
 
         if use_sam_style:
             enable_running_stats(model)
@@ -521,7 +525,7 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
                             "lf/k_off_norm": stats.get("k_off_norm"),
                             "lf/k_diag_sqrt_sum": stats.get("k_diag_sqrt_sum"),
                         },
-                        step=epoch * len(train_loader) + i,
+                        step=global_step,
                     )
             except Exception:
                 pass
@@ -558,12 +562,19 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
     ori_train_err.append(ori_total_err / len(train_loader.dataset)) 
    
     if args.wandb:
-        wandb.log({"train loss": total_loss / len(train_loader.dataset)})
-        wandb.log({"train acc": 1 - total_err / len(train_loader.dataset)})
+        import wandb  # type: ignore
+        step_end = base_step + len(train_loader) - 1
+        wandb.log(
+            {
+                "train loss": total_loss / len(train_loader.dataset),
+                "train acc": 1 - total_err / len(train_loader.dataset),
+            },
+            step=step_end,
+        )
     
     arr_time.append(batch_time.sum)
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, wandb_step=None):
     """
     Run evaluation
     """
@@ -623,8 +634,14 @@ def validate(val_loader, model, criterion):
     test_err.append(total_err / len(val_loader.dataset))
     
     if args.wandb:
-        wandb.log({"test loss": total_loss / len(val_loader.dataset)})
-        wandb.log({"test acc": 1 - total_err / len(val_loader.dataset)})
+        import wandb  # type: ignore
+        wandb.log(
+            {
+                "test loss": total_loss / len(val_loader.dataset),
+                "test acc": 1 - total_err / len(val_loader.dataset),
+            },
+            step=wandb_step,
+        )
 
     return top1.avg
 
