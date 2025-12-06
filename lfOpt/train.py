@@ -83,17 +83,17 @@ parser.add_argument('--sigma',  default=1, type=float,
 parser.add_argument('--lmbda',  default=0.95, type=float,
                     metavar='L', help='lambda for FriendlySAM')
 
-# LowFreqAdamW parameters
+# LowFreqAdam parameters (SVD kernel version)
+parser.add_argument('--lf_m', default=4, type=int,
+                    help='Number of low-frequency components to keep.')
 parser.add_argument('--lf_sigma', default=1.0, type=float,
-                    help='Base sigma for LowFreqAdamW (adapt_mode="none").')
+                    help='Kernel width sigma for low-frequency smoothing.')
 parser.add_argument('--lf_lam', default=0.5, type=float,
-                    help='Random-walk mixing coefficient lambda for LowFreqAdamW.')
-parser.add_argument('--lf_eta', default=1e-2, type=float,
-                    help='Teleport / mixing parameter eta for LowFreqAdamW.')
-parser.add_argument('--lf_mode', default='global', type=str,
-                    help='Adaptive sigma mode for LowFreqAdamW: "none", "global", or "local".')
-parser.add_argument('--lf_base', default='sgd', type=str,
-                    help='Base optimizer for LowFreq variants: "sgd" or "adamw".')
+                    help='Mixing coefficient lambda for low-frequency smoothing.')
+parser.add_argument('--lf_scale_match', action='store_true',
+                    help='Match norm after smoothing (default off).')
+parser.add_argument('--lf_base', default='adam', type=str,
+                    help='Base optimizer for LowFreq variants: "adam" or "sgd".')
 
 
 
@@ -338,10 +338,7 @@ def main():
         )
     elif opt_name in ('lfsam', 'lowfreqsam'):
         lf_base = args.lf_base.lower()
-        if lf_base == 'adamw':
-            base_impl = torch.optim.AdamW
-        else:
-            base_impl = torch.optim.SGD
+        base_impl = torch.optim.Adam if lf_base != 'sgd' else torch.optim.SGD
         base_optimizer = LowFreqAdamW
         optimizer = SAM(
             model.parameters(),
@@ -350,26 +347,23 @@ def main():
             adaptive=0,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            m=args.lf_m,
             sigma=args.lf_sigma,
             lam=args.lf_lam,
-            eta=args.lf_eta,
-            adapt_mode=args.lf_mode,
+            scale_match=args.lf_scale_match,
             base_impl=base_impl,
         )
     elif opt_name in ('lfadamw', 'lowfreqadamw', 'lowfreq_adamw'):
         lf_base = args.lf_base.lower()
-        if lf_base == 'adamw':
-            base_impl = torch.optim.AdamW
-        else:
-            base_impl = torch.optim.SGD
+        base_impl = torch.optim.Adam if lf_base != 'sgd' else torch.optim.SGD
         optimizer = LowFreqAdamW(
             model.parameters(),
             lr=args.lr,
             weight_decay=args.weight_decay,
+            m=args.lf_m,
             sigma=args.lf_sigma,
             lam=args.lf_lam,
-            eta=args.lf_eta,
-            adapt_mode=args.lf_mode,
+            scale_match=args.lf_scale_match,
             base_impl=base_impl,
         )
     else:
