@@ -17,10 +17,10 @@ opt=LFSAM
 
 # LowFreqAdam-specific hyperparameters
 lf_m=4
-lf_sigma=1.0
-lf_lam=0.5
-lf_scale_match=false
-lf_base=adam     # adam | sgd
+lf_sigma=0.1
+lf_lam=1.0
+lf_scale_match=true
+lf_base=sgd     # adam | sgd
 
 DST=results/$opt/$datasets/$model/${opt}_cutout_${rho}_${sigma}_${lmbda}_${epoch}_${model}_bz${bz}_wd${wd}_${datasets}_${schedule}_seed${seed}
 

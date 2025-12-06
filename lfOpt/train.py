@@ -152,7 +152,7 @@ args = parser.parse_args()
 
 if args.wandb:
     import wandb
-    wandb.init(project="TWA", entity="nblt")
+    wandb.init(project="TWA")
     date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) 
     wandb.run.name = args.EXP + date
 
