@@ -92,6 +92,8 @@ parser.add_argument('--lf_eta', default=1e-2, type=float,
                     help='Teleport / mixing parameter eta for LowFreqAdamW.')
 parser.add_argument('--lf_mode', default='global', type=str,
                     help='Adaptive sigma mode for LowFreqAdamW: "none", "global", or "local".')
+parser.add_argument('--lf_base', default='sgd', type=str,
+                    help='Base optimizer for LowFreq variants: "sgd" or "adamw".')
 
 
 
@@ -334,7 +336,32 @@ def main():
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
+    elif opt_name in ('lfsam', 'lowfreqsam'):
+        lf_base = args.lf_base.lower()
+        if lf_base == 'adamw':
+            base_impl = torch.optim.AdamW
+        else:
+            base_impl = torch.optim.SGD
+        base_optimizer = LowFreqAdamW
+        optimizer = SAM(
+            model.parameters(),
+            base_optimizer,
+            rho=args.rho,
+            adaptive=0,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            sigma=args.lf_sigma,
+            lam=args.lf_lam,
+            eta=args.lf_eta,
+            adapt_mode=args.lf_mode,
+            base_impl=base_impl,
+        )
     elif opt_name in ('lfadamw', 'lowfreqadamw', 'lowfreq_adamw'):
+        lf_base = args.lf_base.lower()
+        if lf_base == 'adamw':
+            base_impl = torch.optim.AdamW
+        else:
+            base_impl = torch.optim.SGD
         optimizer = LowFreqAdamW(
             model.parameters(),
             lr=args.lr,
@@ -343,6 +370,7 @@ def main():
             lam=args.lf_lam,
             eta=args.lf_eta,
             adapt_mode=args.lf_mode,
+            base_impl=base_impl,
         )
     else:
         raise ValueError("Unknown optimizer: {}".format(args.optimizer))
@@ -425,6 +453,13 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
     model.train()
 
     use_sam_style = isinstance(optimizer, (SAM, FriendlySAM))
+    lf_hook = False
+    if use_sam_style and hasattr(optimizer, "base_optimizer") and hasattr(optimizer.base_optimizer, "shape_grad"):
+        lf_hook = True
+        shape_fn = optimizer.base_optimizer.shape_grad
+    elif hasattr(optimizer, "shape_grad"):
+        lf_hook = True
+        shape_fn = optimizer.shape_grad
 
     total_loss, total_err = 0, 0
     post_total_loss, post_total_err = 0, 0
@@ -447,6 +482,8 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
 
             # first forward-backward step
             predictions = model(input_var)
+            if lf_hook:
+                predictions.register_hook(lambda g, x_embed=input_var.detach(): shape_fn(g, x_embed))
             loss = criterion(predictions, target_var)
             loss.mean().backward()
             optimizer.first_step(zero_grad=True)
@@ -454,6 +491,8 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
             # second forward-backward step
             disable_running_stats(model)
             output_adv = model(input_var)
+            if lf_hook:
+                output_adv.register_hook(lambda g, x_embed=input_var.detach(): shape_fn(g, x_embed))
             loss_adv = criterion(output_adv, target_var)
             loss_adv.mean().backward()
             optimizer.second_step(zero_grad=True)
@@ -462,6 +501,8 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
             loss = loss.float()
         else:
             output = model(input_var)
+            if lf_hook:
+                output.register_hook(lambda g, x_embed=input_var.detach(): shape_fn(g, x_embed))
             loss = criterion(output, target_var)
             loss.backward()
             optimizer.step()
