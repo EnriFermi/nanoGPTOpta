@@ -59,7 +59,7 @@ class LowFreqAdamW(torch.optim.Optimizer):
         dv = K.diag().clamp_min(1e-12).sqrt()
         Khat = (K / dv).t() / dv
         # keep Khat in floating-point; caller will cast to the gradient dtype
-        return Khat
+        return Khat, K
 
     def zero_grad(self, set_to_none=True):
         self.base.zero_grad(set_to_none=set_to_none)
@@ -73,13 +73,26 @@ class LowFreqAdamW(torch.optim.Optimizer):
         B = grad.shape[0]
         r_flat = grad.view(B, -1)
         # ensure Khat matches the gradient dtype/device
-        Khat = self._khat(x).to(dtype=grad.dtype, device=grad.device)
+        Khat, K = self._khat(x)
+        Khat = Khat.to(dtype=grad.dtype, device=grad.device)
+        K = K.to(dtype=grad.dtype, device=grad.device)
         r_tilde_flat = (1.0 - self.lam) * r_flat + self.lam * (Khat @ r_flat)
         if self.scale_match:
             rn = r_flat.norm()
             rtn = r_tilde_flat.norm()
             r_tilde_flat = (rn / (rtn + 1e-12)) * r_tilde_flat
         r_tilde = r_tilde_flat.view_as(grad)
+
+        # Logging diagnostics for SAM runs
+        eye = torch.eye(K.shape[0], device=K.device, dtype=K.dtype)
+        k_norm = K.norm().item()
+        k_off_norm = (K - eye * K).norm().item()
+        k_diag_sqrt_sum = torch.sqrt(K.diag().sum().clamp_min(0)).item()
+        self.last_kernel_stats = {
+            "k_norm": k_norm,
+            "k_off_norm": k_off_norm,
+            "k_diag_sqrt_sum": k_diag_sqrt_sum,
+        }
 
         if self.debug:
             def _check(name, t):

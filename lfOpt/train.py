@@ -448,12 +448,15 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
 
     use_sam_style = isinstance(optimizer, (SAM, FriendlySAM))
     lf_hook = False
+    lf_obj = None
     if use_sam_style and hasattr(optimizer, "base_optimizer") and hasattr(optimizer.base_optimizer, "shape_grad"):
         lf_hook = True
         shape_fn = optimizer.base_optimizer.shape_grad
+        lf_obj = optimizer.base_optimizer
     elif hasattr(optimizer, "shape_grad"):
         lf_hook = True
         shape_fn = optimizer.shape_grad
+        lf_obj = optimizer
 
     total_loss, total_err = 0, 0
     post_total_loss, post_total_err = 0, 0
@@ -506,6 +509,22 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
             loss_adv = loss
 
         lr_scheduler.step()
+
+        if lf_hook and lf_obj is not None and args.wandb:
+            try:
+                import wandb  # type: ignore
+                stats = getattr(lf_obj, "last_kernel_stats", None)
+                if stats:
+                    wandb.log(
+                        {
+                            "lf/k_norm": stats.get("k_norm"),
+                            "lf/k_off_norm": stats.get("k_off_norm"),
+                            "lf/k_diag_sqrt_sum": stats.get("k_diag_sqrt_sum"),
+                        },
+                        step=epoch * len(train_loader) + i,
+                    )
+            except Exception:
+                pass
 
         total_loss += loss.item() * input_var.shape[0]
         total_err += (output.max(dim=1)[1] != target_var).sum().item()
