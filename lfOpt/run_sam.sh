@@ -20,5 +20,4 @@ DST=results/$opt/$datasets/$model/${opt}_cutout_${rho}_${sigma}_${lmbda}_${epoch
 CUDA_VISIBLE_DEVICES=$device python -u train.py --datasets $datasets \
         --arch=$model --epochs=$epoch --wd=$wd --randomseed $seed --lr 0.05 --rho $rho --optimizer $opt \
         --save-dir=$DST/checkpoints --log-dir=$DST -p 200 --schedule $schedule -b $bz \
-        --cutout --sigma $sigma --lmbda $lmbda
-
+        --cutout --sigma $sigma --lmbda $lmbda --wandb
