@@ -28,5 +28,5 @@ CUDA_VISIBLE_DEVICES=$device python -u train.py --datasets $datasets \
         --arch=$model --epochs=$epoch --wd=$wd --randomseed $seed --lr 0.05 --rho $rho --optimizer $opt \
         --save-dir=$DST/checkpoints --log-dir=$DST -p 200 --schedule $schedule -b $bz \
         --cutout --sigma $sigma --lmbda $lmbda \
-        --lf_sigma $lf_sigma --lf_lam $lf_lam --lf_eta $lf_eta --lf_mode $lf_mode --lf_base $lf_base
-
+        --lf_sigma $lf_sigma --lf_lam $lf_lam --lf_eta $lf_eta --lf_mode $lf_mode --lf_base $lf_base \
+        --wandb
