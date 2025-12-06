@@ -168,3 +168,153 @@ class LowFreqAdamPerLayer(torch.optim.Optimizer):
     def step_base(self):
         self.base.step()
         self.step_id += 1
+
+
+# ---------------- Dirichlet (simplex) variant ----------------
+
+@torch.no_grad()
+def stick_break(p: torch.Tensor) -> torch.Tensor:
+    # p: [B,C], sum=1. returns z in [0,1]^{C-1} (stick-breaking coordinates)
+    B, C = p.shape
+    z = torch.empty(B, C-1, dtype=p.dtype, device=p.device)
+    s = torch.zeros(B, 1, dtype=p.dtype, device=p.device)
+    eps = 1e-12
+    for i in range(C-1):
+        denom = (1 - s).clamp_min(eps)
+        z[:, i] = (p[:, i:i+1] / denom).squeeze(1)
+        s = s + p[:, i:i+1]
+    return z.clamp(0, 1)
+
+
+@torch.no_grad()
+def jacobi_orthonormal_on_01(x: torch.Tensor, a: float, b: float, M: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Orthonormal shifted Jacobi basis on [0,1] w.r.t. weight x^a (1-x)^b, a,b > -1.
+    Returns Phi: [B, M+1] and eigenvalues lam: [M+1] with lam_n = n(n + a + b + 1).
+    """
+    t = (2.0 * x - 1.0).to(torch.float64)
+    alpha = float(b)
+    beta = float(a)
+    B = t.shape[0]
+    M = int(M)
+    Phi = torch.empty(B, M + 1, dtype=torch.float64, device=t.device)
+
+    def h_n(n):
+        a0, b0 = alpha, beta
+        num = torch.exp(torch.lgamma(torch.tensor(n + a0 + 1.0)) + torch.lgamma(torch.tensor(n + b0 + 1.0)))
+        den = torch.exp(torch.lgamma(torch.tensor(n + 1.0)) + torch.lgamma(torch.tensor(n + a0 + b0 + 1.0)))
+        return (2.0 ** (a0 + b0 + 1.0)) * num / ((2 * n + a0 + b0 + 1.0) * den)
+
+    P0 = torch.ones_like(t)
+    norm0 = (2.0 ** (-(a + b + 1.0))) * h_n(0)
+    Phi[:, 0] = (P0 / math.sqrt(norm0))
+    if M == 0:
+        lam0 = torch.tensor([0.0], dtype=torch.float64, device=t.device)
+        return Phi.to(x.dtype), lam0
+
+    P1 = 0.5 * ((2.0 + alpha + beta) * t + (alpha - beta))
+    norm1 = (2.0 ** (-(a + b + 1.0))) * h_n(1)
+    Phi[:, 1] = (P1 / math.sqrt(norm1))
+
+    Pnm1, Pn = P0, P1
+    for n in range(1, M):
+        A = 2.0 * (n + 1.0) * (n + alpha + beta + 1.0)
+        Bc = (2.0 * n + alpha + beta + 1.0)
+        C = 2.0 * (n + alpha) * (n + beta)
+        denom1 = (2.0 * n + alpha + beta + 1.0) * (2.0 * n + alpha + beta + 2.0)
+        denom2 = (2.0 * n + alpha + beta) * (2.0 * n + alpha + beta + 2.0)
+        Acoef = A / denom1
+        Bcoef = (alpha**2 - beta**2) / denom2
+        Ccoef = C / ((2.0 * n + alpha + beta) * (2.0 * n + alpha + beta + 1.0))
+        Pnp1 = ((Acoef * Bc) * t + Bcoef) * Pn - Ccoef * Pnm1
+        normn1 = (2.0 ** (-(a + b + 1.0))) * h_n(n + 1)
+        Phi[:, n + 1] = (Pnp1 / torch.sqrt(normn1))
+        Pnm1, Pn = Pn, Pnp1
+
+    n = torch.arange(0, M + 1, device=t.device, dtype=torch.float64)
+    lam = n * (n + (a + b + 1.0))
+    return Phi.to(x.dtype), lam
+
+
+@torch.no_grad()
+def dirichlet_batch_kernel(probs: torch.Tensor, alpha: torch.Tensor, M: int, t_heat: float) -> torch.Tensor:
+    """
+    probs: [B,C] on simplex; alpha: [C] Dirichlet parameters (>0).
+    Build BxB heat kernel via separable stick-breaking Jacobi features with degree M and time t_heat.
+    """
+    B, C = probs.shape
+    assert alpha.numel() == C
+    z = stick_break(probs)  # [B, C-1]
+    a = alpha[:-1]
+    b = torch.flip(alpha, dims=[0]).cumsum(0)
+    b = torch.flip(b, dims=[0])[1:]
+    K = None
+    for i in range(C - 1):
+        Phi_i, lam_i = jacobi_orthonormal_on_01(z[:, i], a[i].item() - 1.0, b[i].item() - 1.0, M)
+        w = torch.exp(-t_heat * lam_i).to(Phi_i.dtype)
+        Ki = (Phi_i * w.view(1, -1)) @ Phi_i.t()
+        K = Ki if K is None else (K * Ki)
+    K = 0.5 * (K + K.t())
+    return K
+
+
+class LowFreqAdamDirichlet(torch.optim.Optimizer):
+    """
+    Adam with batch-wise Dirichlet–Jacobi heat kernel on the probability simplex.
+    For logits [B,C]: Kr = K_BB(probs; alpha, M, t_heat) @ r, r = dL/dlogits.
+    For logits [B,T,C]: applies the same K_BB to each time slice.
+    """
+    def __init__(self, params, lr=3e-4, betas=(0.9,0.999), eps=1e-8, weight_decay=0.0,
+                 alpha=None, M=6, t_heat=0.1, lam=0.3, scale_match=False):
+        self.base = Adam(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.alpha = None if alpha is None else torch.as_tensor(alpha, dtype=torch.float32)
+        self.M = int(M)
+        self.t_heat = float(t_heat)
+        self.lam = float(lam)
+        self.scale_match = bool(scale_match)
+        super().__init__(self.base.param_groups, self.base.defaults)
+
+    def zero_grad(self, set_to_none=True):
+        self.base.zero_grad(set_to_none=set_to_none)
+
+    def _apply_K(self, probs, r):
+        if self.alpha is None:
+            alpha = torch.ones(probs.size(1), dtype=probs.dtype, device=probs.device)
+        else:
+            alpha = self.alpha.to(probs.device, probs.dtype)
+        K = dirichlet_batch_kernel(probs, alpha, self.M, self.t_heat).to(r.dtype)
+        return K @ r
+
+    def step(self, closure):
+        logits, _, embeds_unused, loss = closure()
+        if logits.dim() == 3:
+            B, T, C = logits.shape
+            probs = logits.detach().float().softmax(-1).mean(1)  # [B,C]
+            N = B * T
+            r_full = torch.autograd.grad(
+                outputs=loss,
+                inputs=logits,
+                grad_outputs=torch.ones_like(loss),
+                retain_graph=False,
+                create_graph=False,
+            )[0].detach()
+            r = r_full.reshape(N, C)
+            Kr = self._apply_K(probs, r.view(B, T, C).reshape(B, T * C)).view(N, C)
+        else:
+            B, C = logits.shape
+            probs = logits.detach().float().softmax(-1)
+            r = torch.autograd.grad(
+                outputs=loss,
+                inputs=logits,
+                grad_outputs=torch.ones_like(loss),
+                retain_graph=False,
+                create_graph=False,
+            )[0].detach()
+            Kr = self._apply_K(probs, r)
+
+        r_tilde = safe_mix(r, Kr, self.lam)
+        if self.scale_match:
+            r_tilde *= (r.norm() / (r_tilde.norm() + 1e-12)).detach()
+        logits.reshape(-1, logits.shape[-1]).backward(gradient=r_tilde.to(logits.dtype))
+        self.base.step()
+        return loss
