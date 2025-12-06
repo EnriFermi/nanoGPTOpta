@@ -155,10 +155,12 @@ if args.wandb:
     wandb.init(project="TWA")
     date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) 
     wandb.run.name = args.EXP + date
-    wandb.define_metric("epoch")
-    wandb.define_metric("train/*", step_metric="epoch")
-    wandb.define_metric("val/*", step_metric="epoch")
-    wandb.define_metric("test/*", step_metric="epoch")
+    wandb.define_metric("train/step")
+    wandb.define_metric("val/step")
+    wandb.define_metric("lf_step")
+    wandb.define_metric("train/*", step_metric="train/step")
+    wandb.define_metric("val/*", step_metric="val/step")
+    wandb.define_metric("test/*", step_metric="val/step")
     wandb.define_metric("lf/*", step_metric="lf_step")
 
 def get_model_param_vec(model):
@@ -569,7 +571,7 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
         import wandb  # type: ignore
         wandb.log(
             {
-                "epoch": epoch,
+                "train/step": epoch,
                 "train/loss": total_loss / len(train_loader.dataset),
                 "train/acc": 1 - total_err / len(train_loader.dataset),
             },
@@ -641,7 +643,7 @@ def validate(val_loader, model, criterion, wandb_step=None):
         import wandb  # type: ignore
         wandb.log(
             {
-                "epoch": wandb_step,
+                "val/step": wandb_step,
                 "val/loss": total_loss / len(val_loader.dataset),
                 "val/acc": 1 - total_err / len(val_loader.dataset),
             },
