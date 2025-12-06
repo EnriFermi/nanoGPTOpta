@@ -412,8 +412,7 @@ def main():
 
 
         # evaluate on validation set
-        val_step = (epoch + 1) * len(train_loader) - 1
-        prec1 = validate(val_loader, model, criterion, wandb_step=val_step)
+        prec1 = validate(val_loader, model, criterion, wandb_step=epoch)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -563,13 +562,12 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
    
     if args.wandb:
         import wandb  # type: ignore
-        step_end = base_step + len(train_loader) - 1
         wandb.log(
             {
                 "train loss": total_loss / len(train_loader.dataset),
                 "train acc": 1 - total_err / len(train_loader.dataset),
             },
-            step=step_end,
+            step=epoch,
         )
     
     arr_time.append(batch_time.sum)
