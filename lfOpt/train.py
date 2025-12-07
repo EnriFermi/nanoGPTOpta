@@ -575,7 +575,6 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
                 "train/loss": total_loss / len(train_loader.dataset),
                 "train/acc": 1 - total_err / len(train_loader.dataset),
             },
-            step=epoch,
         )
     
     arr_time.append(batch_time.sum)
@@ -646,8 +645,7 @@ def validate(val_loader, model, criterion, wandb_step=None):
                 "val/step": wandb_step,
                 "val/loss": total_loss / len(val_loader.dataset),
                 "val/acc": 1 - total_err / len(val_loader.dataset),
-            },
-            step=wandb_step,
+            }
         )
 
     return top1.avg
