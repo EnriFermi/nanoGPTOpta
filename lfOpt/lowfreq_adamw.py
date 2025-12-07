@@ -137,6 +137,22 @@
 import math
 import torch
 
+def set_correlation_scores(V):
+    m, n = V.shape
+    U = V / V.norm(dim=1, keepdim=True)
+    G = U @ U.t()
+    mask = ~torch.eye(m, dtype=torch.bool, device=V.device)
+    off = G[mask]
+    A = off.abs().mean()
+    ln_a = torch.lgamma(torch.tensor(n / 2, device=V.device)) \
+           - 0.5 * torch.log(torch.tensor(math.pi, device=V.device)) \
+           - torch.lgamma(torch.tensor((n + 1) / 2, device=V.device))
+    a_n = torch.exp(ln_a)
+    C_abs = (A - a_n) / (1 - a_n)
+    B = (off * off).mean()
+    C_sq = (B - 1.0 / n) / (1 - 1.0 / n)
+    return C_abs, C_sq
+
 
 class LowFreqAdamW(torch.optim.Optimizer):
     """
@@ -171,6 +187,7 @@ class LowFreqAdamW(torch.optim.Optimizer):
         self.W = None
         self.clip_grad_norm = None
         self.debug = False
+        self.last_grad_stats = None
         super().__init__(self.base.param_groups, self.base.defaults)
         self.state = self.base.state
 
@@ -263,13 +280,20 @@ class LowFreqAdamW(torch.optim.Optimizer):
             "var_frac_v": float(v),
             "target_ratio": float(c_tgt),
             "achieved_ratio": float(self._energy_ratio(r_flat, Khat)),
-            "K_norm": K.norm().item(),
-            "K_off_norm": (K - eye * K).norm().item(),
+            "k_norm": K.norm().item(),
+            "k_off_norm": (K - eye * K).norm().item(),
         }
         if self.debug:
             for k, v_ in self.last_kernel_stats.items():
                 if isinstance(v_, float):
                     if not math.isfinite(v_): print(f"[LFAdamW] {k} non-finite")
+        mean_grad_norm = r_tilde_flat.norm(dim=1).mean().item()
+        c_abs, c_sq = set_correlation_scores(r_tilde_flat)
+        self.last_grad_stats = {
+            "grad_norm": mean_grad_norm,
+            "grad_c_abs": c_abs.item(),
+            "grad_c_sq": c_sq.item(),
+        }
         return out
 
     def step(self, closure=None):

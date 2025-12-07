@@ -25,6 +25,24 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 from utils import *
 from lowfreq_adamw import LowFreqAdamW
 
+
+def set_correlation_scores(V):
+    m, n = V.shape
+    U = V / V.norm(dim=1, keepdim=True)
+    G = U @ U.t()
+    mask = ~torch.eye(m, dtype=torch.bool, device=V.device)
+    off = G[mask]
+    A = off.abs().mean()
+    ln_a = torch.lgamma(torch.tensor(n / 2, device=V.device)) \
+           - 0.5 * torch.log(torch.tensor(math.pi, device=V.device)) \
+           - torch.lgamma(torch.tensor((n + 1) / 2, device=V.device))
+    a_n = torch.exp(ln_a)
+    C_abs = (A - a_n) / (1 - a_n)
+    B = (off * off).mean()
+    C_sq = (B - 1.0 / n) / (1 - 1.0 / n)
+    return C_abs, C_sq
+
+
 # Parse arguments
 parser = argparse.ArgumentParser(description='Regular SGD training')
 parser.add_argument('--EXP', metavar='EXP', help='experiment name', default='SGD')
@@ -158,10 +176,12 @@ if args.wandb:
     wandb.define_metric("train/step")
     wandb.define_metric("val/step")
     wandb.define_metric("lf_step")
+    wandb.define_metric("grad/step")
     wandb.define_metric("train/*", step_metric="train/step")
     wandb.define_metric("val/*", step_metric="val/step")
     wandb.define_metric("test/*", step_metric="val/step")
     wandb.define_metric("lf/*", step_metric="lf_step")
+    wandb.define_metric("grad/*", step_metric="grad/step")
 
 def get_model_param_vec(model):
     # Return the model parameters as a vector
@@ -522,16 +542,28 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler, epoch):
 
         if lf_hook and lf_obj is not None and args.wandb:
             stats = getattr(lf_obj, "last_kernel_stats", None)
-            if stats:
+            grad_stats = getattr(lf_obj, "last_grad_stats", None)
+            if stats or grad_stats:
                 try:
                     import wandb  # type: ignore
+                    log_pack = {"lf_step": global_step}
+                    if stats:
+                        log_pack.update({
+                            "lf/k_norm": stats.get("K_norm") or stats.get("k_norm"),
+                            "lf/k_off_norm": stats.get("K_off_norm") or stats.get("k_off_norm"),
+                            "lf/sigma": stats.get("sigma_star"),
+                            "lf/target_ratio": stats.get("target_ratio"),
+                            "lf/achieved_ratio": stats.get("achieved_ratio"),
+                        })
+                    if grad_stats:
+                        log_pack.update({
+                            "grad/norm": grad_stats.get("grad_norm"),
+                            "grad/c_abs": grad_stats.get("grad_c_abs"),
+                            "grad/c_sq": grad_stats.get("grad_c_sq"),
+                            "grad/step": global_step,
+                        })
                     wandb.log(
-                        {
-                            "lf_step": global_step,
-                            "lf/k_norm": stats.get("k_norm"),
-                            "lf/k_off_norm": stats.get("k_off_norm"),
-                            "lf/k_diag_sqrt_sum": stats.get("k_diag_sqrt_sum"),
-                        }
+                        log_pack
                     )
                 except Exception:
                     pass
